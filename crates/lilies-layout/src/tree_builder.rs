@@ -244,6 +244,7 @@ pub fn build_layout_tree_with_images(
             } else {
                 if !inline_run.is_empty() {
                     let mut anon = LayoutBox::new(BoxType::AnonymousBlock);
+                    anon.style = style.clone();
                     anon.children = std::mem::take(&mut inline_run);
                     normalized.push(anon);
                 }
@@ -253,6 +254,7 @@ pub fn build_layout_tree_with_images(
 
         if !inline_run.is_empty() {
             let mut anon = LayoutBox::new(BoxType::AnonymousBlock);
+            anon.style = style.clone();
             anon.children = inline_run;
             normalized.push(anon);
         }

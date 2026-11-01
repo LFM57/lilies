@@ -470,7 +470,7 @@ impl LayoutBox {
                     .as_ref()
                     .map_or(lilies_css::TextAlign::Left, |s| s.text_align);
                 let containing_block_width = available_width;
-                if text_align != lilies_css::TextAlign::Left {
+                if text_align != lilies_css::TextAlign::Left && containing_block_width.is_finite() {
                     for line in &mut self.lines {
                         let space = containing_block_width - line.rect.width;
                         match text_align {
@@ -508,7 +508,7 @@ impl LayoutBox {
             let mut max_w = 0.0f32;
             let mut child_cb = self.dimensions;
             if child_cb.content.width == 0.0 {
-                child_cb.content.width = containing_block.content.width;
+                child_cb.content.width = f32::INFINITY;
             }
             for child in &mut self.children {
                 child.layout(child_cb);
@@ -520,6 +520,24 @@ impl LayoutBox {
             }
             if self.dimensions.content.width == 0.0 {
                 self.dimensions.content.width = max_w;
+            }
+
+            // Align this inline container within containing_block if text-align is specified
+            let text_align = self
+                .style
+                .as_ref()
+                .map_or(lilies_css::TextAlign::Left, |s| s.text_align);
+            let total_w = self.dimensions.margin_box().width;
+            let space = containing_block.content.width - total_w;
+            if space > 0.0 && containing_block.content.width.is_finite() {
+                let shift_x = match text_align {
+                    lilies_css::TextAlign::Center => space / 2.0,
+                    lilies_css::TextAlign::Right => space,
+                    lilies_css::TextAlign::Left => 0.0,
+                };
+                if shift_x > 0.0 {
+                    self.offset_by(shift_x, 0.0);
+                }
             }
         }
     }
