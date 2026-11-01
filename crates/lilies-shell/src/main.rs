@@ -1,42 +1,19 @@
 #![deny(unsafe_code)]
 
-use lilies_css::{compute_styles, StyleSheet};
+use lilies_css::{compute_styles, StyleSheet, StyleTree};
+use lilies_dom::{Document, NodeId};
 use lilies_html::parse_html;
-use lilies_layout::{build_layout_tree, layout, BoxType, Dimensions, LayoutBox, Rect};
-use lilies_paint::{build_display_list, rasterize, Color, DisplayItem, Pixmap};
-use std::time::Instant;
+use lilies_layout::{build_layout_tree, layout, Dimensions, Rect};
+use lilies_paint::{build_display_list, rasterize, Color, Pixmap};
+use softbuffer::{Context, Surface};
+use std::num::NonZeroU32;
+use std::sync::Arc;
+use winit::dpi::LogicalSize;
+use winit::event::{Event, WindowEvent};
+use winit::event_loop::EventLoop;
+use winit::window::{Window, WindowBuilder};
 
-fn count_layout_nodes(layout_box: &LayoutBox) -> usize {
-    1 + layout_box
-        .children
-        .iter()
-        .map(count_layout_nodes)
-        .sum::<usize>()
-}
-
-fn print_layout_tree(layout_box: &LayoutBox, indent: usize) {
-    let pad = "  ".repeat(indent);
-    let box_desc = match layout_box.box_type {
-        BoxType::BlockNode(id) => format!("BlockNode({})", id),
-        BoxType::InlineNode(id) => format!("InlineNode({})", id),
-        BoxType::AnonymousBlock => "AnonymousBlock".to_string(),
-    };
-    let c = &layout_box.dimensions.content;
-    let m = &layout_box.dimensions.margin;
-    let p = &layout_box.dimensions.padding;
-    println!(
-        "{}* {} content: ({:.1}, {:.1}, {:.1}x{:.1}) margin: [{:.1}, {:.1}, {:.1}, {:.1}] padding: [{:.1}, {:.1}, {:.1}, {:.1}]",
-        pad, box_desc, c.x, c.y, c.width, c.height, m.top, m.right, m.bottom, m.left, p.top, p.right, p.bottom, p.left
-    );
-    for child in &layout_box.children {
-        print_layout_tree(child, indent + 1);
-    }
-}
-
-fn main() {
-    println!("=== lilies: Modern Browser Engine (Milestones 1, 2, 3 & 4) ===");
-
-    let html_input = r#"<html>
+pub const DEFAULT_HTML: &str = r#"<html>
   <body style="background-color: #ffffff;">
     <div class="card" style="background-color: #2b3a4a; width: 400px; height: 300px; margin: 50px auto;">
       <div class="inner" style="background-color: #ff5722; width: 200px; height: 100px; margin: 20px;"></div>
@@ -44,34 +21,85 @@ fn main() {
   </body>
 </html>"#;
 
-    println!("\n--- 1. Input HTML Document ---");
-    println!("{}", html_input);
+/// Re-runs the layout engine and rasterizer for the document given the viewport dimensions.
+pub fn render_to_pixmap(
+    doc: &Document,
+    html_id: NodeId,
+    styles: &StyleTree,
+    width: u32,
+    height: u32,
+) -> Option<Pixmap> {
+    let mut root_box = build_layout_tree(html_id, doc.arena(), styles)?;
+    let viewport = Dimensions::new(Rect::new(0.0, 0.0, width as f32, height as f32));
+    layout(&mut root_box, viewport);
 
-    let start_total = Instant::now();
+    let display_list = build_display_list(&root_box);
+    let mut pixmap = Pixmap::new(width, height, Color::WHITE);
+    rasterize(&display_list, &mut pixmap);
+    Some(pixmap)
+}
 
-    // Step 1: HTML Parsing
-    let t0 = Instant::now();
-    let doc = parse_html(html_input);
-    let html_dur = t0.elapsed();
-    println!(
-        "\n[1/5] HTML Parsed: {} DOM nodes (took {:?})",
-        doc.arena().len(),
-        html_dur
-    );
+/// Copies RGBA pixels from `Pixmap` into a `softbuffer` `u32` slice in `0x00RRGGBB` format.
+pub fn copy_pixmap_to_softbuffer(pixmap: &Pixmap, buffer: &mut [u32]) {
+    for (chunk, dst) in pixmap
+        .pixels
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(buffer.iter_mut())
+    {
+        let r = chunk[0] as u32;
+        let g = chunk[1] as u32;
+        let b = chunk[2] as u32;
+        *dst = (r << 16) | (g << 8) | b;
+    }
+}
 
-    // Step 2: CSS & Style Computation
-    let t1 = Instant::now();
+/// Executes dynamic layout, rasterization, and presentation onto the window surface.
+fn render_frame(
+    surface: &mut Surface<Arc<Window>, Arc<Window>>,
+    doc: &Document,
+    html_id: NodeId,
+    styles: &StyleTree,
+    width: u32,
+    height: u32,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else {
+        return Ok(());
+    };
+
+    surface.resize(w, h)?;
+
+    let pixmap = render_to_pixmap(doc, html_id, styles, width, height)
+        .ok_or("Failed to build layout tree from root")?;
+
+    let mut buffer = surface.buffer_mut()?;
+    copy_pixmap_to_softbuffer(&pixmap, &mut buffer);
+    buffer.present()?;
+
+    Ok(())
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== lilies: Modern Browser Engine (Milestone 5 - Interactive Window) ===");
+
+    // Step 1: Parse HTML & compute styles once (document state)
+    let html_content = if let Some(path) = std::env::args().nth(1) {
+        std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            eprintln!(
+                "Could not read '{}': {}. Using default demo HTML.",
+                path, err
+            );
+            DEFAULT_HTML.to_string()
+        })
+    } else {
+        DEFAULT_HTML.to_string()
+    };
+
+    let doc = parse_html(&html_content);
     let stylesheet = StyleSheet::new();
     let styles = compute_styles(&doc, &stylesheet);
-    let css_dur = t1.elapsed();
-    println!(
-        "[2/5] Styles Computed: {} styled elements (took {:?})",
-        styles.len(),
-        css_dur
-    );
 
-    // Step 3: Layout Tree Construction & Block Layout
-    let t2 = Instant::now();
     let html_id = doc
         .get_children(doc.root())
         .into_iter()
@@ -80,72 +108,158 @@ fn main() {
                 .and_then(|n| n.as_element())
                 .is_some_and(|el| el.tag_name() == "html")
         })
-        .expect("html element required");
+        .expect("Root <html> element required in document");
 
-    let mut root_box =
-        build_layout_tree(html_id, doc.arena(), &styles).expect("Failed to build layout tree");
-    let viewport = Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0));
-    layout(&mut root_box, viewport);
-    let layout_dur = t2.elapsed();
-    let layout_nodes = count_layout_nodes(&root_box);
     println!(
-        "[3/5] Layout Computed: {} layout boxes, viewport 800x600 (took {:?})",
-        layout_nodes, layout_dur
+        "Document parsed successfully (DOM nodes: {})",
+        doc.arena().len()
     );
 
-    println!("\n--- Layout Tree ---");
-    print_layout_tree(&root_box, 0);
-
-    // Step 4: Display List Construction
-    let t3 = Instant::now();
-    let display_list = build_display_list(&root_box);
-    let paint_dur = t3.elapsed();
-    println!(
-        "\n[4/5] Display List Built: {} display items (took {:?})",
-        display_list.len(),
-        paint_dur
+    // Step 2: Initialize EventLoop and Window titled "lilies"
+    let event_loop = EventLoop::new()?;
+    let window = Arc::new(
+        WindowBuilder::new()
+            .with_title("lilies")
+            .with_inner_size(LogicalSize::new(800.0, 600.0))
+            .build(&event_loop)?,
     );
-    for (i, item) in display_list.iter().enumerate() {
-        match item {
-            DisplayItem::SolidColor { rect, color } => {
-                println!(
-                    "  [{}] SolidColor: ({:.1}, {:.1}, {:.1}x{:.1}) color={}",
-                    i, rect.x, rect.y, rect.width, rect.height, color
-                );
-            }
-            DisplayItem::Border {
-                rect,
-                widths,
-                color,
-            } => {
-                println!(
-                    "  [{}] Border: ({:.1}, {:.1}, {:.1}x{:.1}) widths=[{:.1}, {:.1}, {:.1}, {:.1}] color={}",
-                    i, rect.x, rect.y, rect.width, rect.height, widths.top, widths.right, widths.bottom, widths.left, color
-                );
-            }
-        }
+
+    // Step 3: Initialize softbuffer Context and Surface
+    let context = Context::new(window.clone())?;
+    let mut surface = Surface::new(&context, window.clone())?;
+
+    // Initial render with current window size
+    let size = window.inner_size();
+    if let Err(e) = render_frame(
+        &mut surface,
+        &doc,
+        html_id,
+        &styles,
+        size.width,
+        size.height,
+    ) {
+        eprintln!("Initial render warning: {e}");
     }
 
-    // Step 5: Rasterization & Output
-    let t4 = Instant::now();
-    let mut pixmap = Pixmap::new(800, 600, Color::WHITE);
-    rasterize(&display_list, &mut pixmap);
-    let output_file = "output.ppm";
-    pixmap
-        .save_ppm(output_file)
-        .expect("Failed to save output PPM");
-    let raster_dur = t4.elapsed();
-    println!(
-        "[5/5] Rasterized & Exported: saved to '{}' (took {:?})",
-        output_file, raster_dur
-    );
+    // Step 4: Run event loop
+    event_loop.run(move |event, elwt| match event {
+        Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
+            WindowEvent::Resized(physical_size) => {
+                if let Err(e) = render_frame(
+                    &mut surface,
+                    &doc,
+                    html_id,
+                    &styles,
+                    physical_size.width,
+                    physical_size.height,
+                ) {
+                    eprintln!("Render error on resize: {e}");
+                }
+            }
+            WindowEvent::RedrawRequested => {
+                let size = window.inner_size();
+                if let Err(e) = render_frame(
+                    &mut surface,
+                    &doc,
+                    html_id,
+                    &styles,
+                    size.width,
+                    size.height,
+                ) {
+                    eprintln!("Render error on redraw: {e}");
+                }
+            }
+            WindowEvent::CloseRequested => {
+                elwt.exit();
+            }
+            _ => {}
+        },
+        _ => {}
+    })?;
 
-    let total_dur = start_total.elapsed();
-    println!("\nComplete Render Pipeline Finished in {:?}", total_dur);
+    Ok(())
+}
 
-    println!("\nPipeline Status:");
-    println!("  [x] HTML Tokenizer & Tree Builder (crates/lilies-html - Milestone 1)");
-    println!("  [x] CSS Parser & Computed Styles (crates/lilies-css - Milestone 2)");
-    println!("  [x] Layout Engine (crates/lilies-layout - Milestone 3)");
-    println!("  [x] Display List & 2D Painter (crates/lilies-paint - Milestone 4)");
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_copy_pixmap_to_softbuffer() {
+        let mut pixmap = Pixmap::new(2, 2, Color::WHITE);
+        pixmap.set_pixel(0, 0, Color::rgba(0x2b, 0x3a, 0x4a, 0xff));
+        pixmap.set_pixel(1, 0, Color::rgba(0xff, 0x57, 0x22, 0xff));
+        pixmap.set_pixel(0, 1, Color::rgba(0x00, 0x00, 0x00, 0xff));
+        pixmap.set_pixel(1, 1, Color::rgba(0xff, 0xff, 0xff, 0xff));
+
+        let mut buffer = vec![0u32; 4];
+        copy_pixmap_to_softbuffer(&pixmap, &mut buffer);
+
+        assert_eq!(buffer[0], 0x002B3A4A);
+        assert_eq!(buffer[1], 0x00FF5722);
+        assert_eq!(buffer[2], 0x00000000);
+        assert_eq!(buffer[3], 0x00FFFFFF);
+    }
+
+    #[test]
+    fn test_card_centering_across_different_viewport_sizes() {
+        let doc = parse_html(DEFAULT_HTML);
+        let stylesheet = StyleSheet::new();
+        let styles = compute_styles(&doc, &stylesheet);
+        let html_id = doc
+            .get_children(doc.root())
+            .into_iter()
+            .find(|&id| {
+                doc.node(id)
+                    .and_then(|n| n.as_element())
+                    .is_some_and(|el| el.tag_name() == "html")
+            })
+            .expect("html element");
+
+        // 1. Viewport 800x600:
+        // Card width: 400. Remaining width: 800 - 400 = 400.
+        // Auto margins split equally: margin-left = 200, margin-right = 200.
+        // Card spans x in [200, 600).
+        let pixmap_800 = render_to_pixmap(&doc, html_id, &styles, 800, 600).expect("pixmap");
+        assert_eq!(pixmap_800.width, 800);
+        assert_eq!(pixmap_800.height, 600);
+
+        let card_color = Color::rgba(0x2b, 0x3a, 0x4a, 0xff);
+        let bg_color = Color::rgba(0xff, 0xff, 0xff, 0xff);
+
+        // At y = 60 (inside card vertically, margin-top is 50):
+        // Just outside left edge
+        assert_eq!(pixmap_800.get_pixel(199, 60), Some(bg_color));
+        // Inside card
+        assert_eq!(pixmap_800.get_pixel(200, 60), Some(card_color));
+        assert_eq!(pixmap_800.get_pixel(599, 60), Some(card_color));
+        // Just outside right edge
+        assert_eq!(pixmap_800.get_pixel(600, 60), Some(bg_color));
+
+        // 2. Viewport resized to 1000x600:
+        // Card width: 400. Remaining width: 1000 - 400 = 600.
+        // margin-left = 300, margin-right = 300.
+        // Card spans x in [300, 700).
+        let pixmap_1000 = render_to_pixmap(&doc, html_id, &styles, 1000, 600).expect("pixmap");
+        assert_eq!(pixmap_1000.width, 1000);
+        assert_eq!(pixmap_1000.height, 600);
+
+        assert_eq!(pixmap_1000.get_pixel(299, 60), Some(bg_color));
+        assert_eq!(pixmap_1000.get_pixel(300, 60), Some(card_color));
+        assert_eq!(pixmap_1000.get_pixel(699, 60), Some(card_color));
+        assert_eq!(pixmap_1000.get_pixel(700, 60), Some(bg_color));
+
+        // 3. Viewport resized to 600x600:
+        // Card width: 400. Remaining width: 600 - 400 = 200.
+        // margin-left = 100, margin-right = 100.
+        // Card spans x in [100, 500).
+        let pixmap_600 = render_to_pixmap(&doc, html_id, &styles, 600, 600).expect("pixmap");
+        assert_eq!(pixmap_600.width, 600);
+        assert_eq!(pixmap_600.height, 600);
+
+        assert_eq!(pixmap_600.get_pixel(99, 60), Some(bg_color));
+        assert_eq!(pixmap_600.get_pixel(100, 60), Some(card_color));
+        assert_eq!(pixmap_600.get_pixel(499, 60), Some(card_color));
+        assert_eq!(pixmap_600.get_pixel(500, 60), Some(bg_color));
+    }
 }
