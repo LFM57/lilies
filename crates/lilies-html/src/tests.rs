@@ -299,3 +299,99 @@ fn test_paragraph_with_anchor_wraps_text_children() {
     let text = doc.node(a_children[0]).and_then(|n| n.as_text()).unwrap();
     assert_eq!(text.data, "Learn more...");
 }
+
+#[test]
+fn test_find_stylesheet_links_and_sources_in_order() {
+    let input = r#"
+        <html>
+        <head>
+            <link rel="stylesheet" href="main.css">
+            <link rel="icon" href="favicon.ico">
+            <style>body { margin: 0; }</style>
+            <link rel="STYLESHEET" href="/theme.css">
+            <link rel="stylesheet" href="">
+            <link href="no-rel.css">
+        </head>
+        <body>
+            <link rel="stylesheet" href="sub/footer.css">
+        </body>
+        </html>
+    "#;
+    let doc = parse_html(input);
+    let links = crate::find_stylesheet_links(&doc);
+    assert_eq!(links, vec!["main.css", "/theme.css", "sub/footer.css"]);
+
+    let sources = crate::extract_style_sources(&doc);
+    assert_eq!(sources.len(), 4);
+    assert_eq!(
+        sources[0],
+        crate::StyleSource::LinkHref("main.css".to_string())
+    );
+    assert!(matches!(&sources[1], crate::StyleSource::StyleTag(t) if t.contains("margin: 0;")));
+    assert_eq!(
+        sources[2],
+        crate::StyleSource::LinkHref("/theme.css".to_string())
+    );
+    assert_eq!(
+        sources[3],
+        crate::StyleSource::LinkHref("sub/footer.css".to_string())
+    );
+}
+
+#[test]
+fn test_load_styles_with_external_fetcher_cascade_merging() {
+    use lilies_css::{Color, TextAlign};
+
+    let input = r#"
+        <html>
+        <head>
+            <link rel="stylesheet" href="style.css">
+            <style>h1 { font-size: 24px; color: green; }</style>
+            <link rel="stylesheet" href="/global.css">
+        </head>
+        <body>
+            <h1 id="title">Lilies Browser</h1>
+        </body>
+        </html>
+    "#;
+    let doc = parse_html(input);
+
+    let styles = crate::load_styles_with_fetcher(
+        &doc,
+        "https://example.com/blog/article.html",
+        |url: &str| -> Result<String, String> {
+            match url {
+                "https://example.com/blog/style.css" => {
+                    Ok("h1 { color: red; max-width: 30em; }".to_string())
+                }
+                "https://example.com/global.css" => {
+                    Ok("h1 { color: blue; text-align: center; }".to_string())
+                }
+                _ => Err(format!("Not found: {}", url)),
+            }
+        },
+    );
+
+    // Find the <h1> element
+    let h1_id = doc
+        .get_children(doc.root())
+        .into_iter()
+        .flat_map(|id| doc.get_children(id))
+        .flat_map(|id| doc.get_children(id))
+        .find(|&id| {
+            doc.node(id)
+                .and_then(|n| n.as_element())
+                .is_some_and(|el| el.tag_name() == "h1")
+        })
+        .expect("h1 element");
+
+    let h1_style = styles.get(h1_id).expect("h1 computed style");
+    // global.css was loaded last, so color: blue overrides style.css (red) and <style> (green)
+    assert_eq!(h1_style.color, Color::BLUE);
+    // font-size from embedded <style> is preserved
+    assert_eq!(h1_style.font_size, 24.0);
+    // max-width from style.css (30em * 24px = 720px)
+    assert_eq!(h1_style.max_width, Some(720.0));
+    // text-align from global.css is applied
+    assert_eq!(h1_style.text_align, TextAlign::Center);
+}

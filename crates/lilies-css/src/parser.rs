@@ -320,7 +320,8 @@ impl CssParser {
                         };
                         match unit_str.to_ascii_lowercase().as_str() {
                             "px" => return Ok(Value::Length(num, Unit::Px)),
-                            "em" | "rem" => return Ok(Value::Length(num * 16.0, Unit::Px)),
+                            "em" => return Ok(Value::Length(num, Unit::Em)),
+                            "rem" => return Ok(Value::Length(num, Unit::Rem)),
                             "vh" => return Ok(Value::Length(num * 6.0, Unit::Px)),
                             "vw" => return Ok(Value::Length(num * 8.0, Unit::Px)),
                             "pt" => return Ok(Value::Length(num * (96.0 / 72.0), Unit::Px)),

@@ -274,3 +274,121 @@ fn test_parse_real_world_css_example_com() {
     assert_eq!(r_body.selectors[0].tag_name.as_deref(), Some("body"));
     assert!(r_body.declarations.iter().any(|d| d.name == "margin"));
 }
+
+#[test]
+fn test_parse_em_and_rem_units() {
+    use crate::ast::{Unit, Value};
+
+    let css = r#"
+        .box {
+            font-size: 2em;
+            width: 26em;
+            height: 1.5rem;
+            margin: 0.5rem 1em;
+            max-width: 30em;
+            text-align: center;
+        }
+    "#;
+    let stylesheet = parse_stylesheet(css).expect("parse em and rem css");
+    assert_eq!(stylesheet.rules.len(), 1);
+    let rule = &stylesheet.rules[0];
+
+    let decl_map: std::collections::HashMap<&str, &Value> = rule
+        .declarations
+        .iter()
+        .map(|d| (d.name.as_str(), &d.value))
+        .collect();
+
+    assert_eq!(
+        decl_map.get("font-size").unwrap(),
+        &&Value::Length(2.0, Unit::Em)
+    );
+    assert_eq!(
+        decl_map.get("width").unwrap(),
+        &&Value::Length(26.0, Unit::Em)
+    );
+    assert_eq!(
+        decl_map.get("height").unwrap(),
+        &&Value::Length(1.5, Unit::Rem)
+    );
+    assert_eq!(
+        decl_map.get("max-width").unwrap(),
+        &&Value::Length(30.0, Unit::Em)
+    );
+    assert_eq!(
+        decl_map.get("text-align").unwrap(),
+        &&Value::Keyword("center".to_string())
+    );
+
+    if let Value::List(items) = decl_map.get("margin").unwrap() {
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0], Value::Length(0.5, Unit::Rem));
+        assert_eq!(items[1], Value::Length(1.0, Unit::Em));
+    } else {
+        panic!("Expected margin to be Value::List");
+    }
+}
+
+#[test]
+fn test_resolve_em_and_rem_to_concrete_pixels() {
+    use crate::TextAlign;
+
+    let mut doc = Document::new();
+    let root = doc.root();
+
+    let mut html_attrs = IndexMap::new();
+    html_attrs.insert("style".to_string(), "font-size: 20px;".to_string());
+    let html = doc.create_element("html", html_attrs);
+    doc.append_child(root, html).unwrap();
+
+    let mut parent_attrs = IndexMap::new();
+    parent_attrs.insert("class".to_string(), "parent".to_string());
+    let parent = doc.create_element("div", parent_attrs);
+    doc.append_child(html, parent).unwrap();
+
+    let mut child_attrs = IndexMap::new();
+    child_attrs.insert("class".to_string(), "child".to_string());
+    let child = doc.create_element("p", child_attrs);
+    doc.append_child(parent, child).unwrap();
+
+    let css = r#"
+        .parent {
+            font-size: 2rem; /* 2 * 20px = 40px */
+            width: 10rem;    /* 10 * 20px = 200px */
+            text-align: center;
+        }
+        .child {
+            /* 1em for font-size refers to parent font-size (40px) */
+            font-size: 0.5em; /* 0.5 * 40px = 20px */
+            /* 1em for other properties refers to element's current font-size (20px) */
+            width: 15em;     /* 15 * 20px = 300px */
+            height: 2rem;    /* 2 * root (20px) = 40px */
+            max-width: 20em; /* 20 * 20px = 400px */
+            padding-top: 1em; /* 1 * 20px = 20px */
+            margin-left: 2rem; /* 2 * 20px = 40px */
+        }
+    "#;
+    let stylesheet = parse_stylesheet(css).unwrap();
+    let styles = compute_styles(&doc, &stylesheet);
+
+    let parent_style = styles.get(parent).expect("parent style");
+    assert_eq!(parent_style.font_size, 40.0);
+    assert_eq!(parent_style.width, LengthOrAuto::Px(200.0));
+    assert_eq!(parent_style.text_align, TextAlign::Center);
+
+    let child_style = styles.get(child).expect("child style");
+    // font-size resolved against parent: 0.5 * 40px = 20px
+    assert_eq!(child_style.font_size, 20.0);
+    // width resolved against element's font-size (20px): 15 * 20px = 300px
+    assert_eq!(child_style.width, LengthOrAuto::Px(300.0));
+    // height resolved against root font-size (20px): 2 * 20px = 40px
+    assert_eq!(child_style.height, LengthOrAuto::Px(40.0));
+    // max-width resolved against element's font-size (20px): 20 * 20px = 400px
+    assert_eq!(child_style.max_width, Some(400.0));
+    // padding-top: 1em = 20px
+    assert_eq!(child_style.padding_top, 20.0);
+    // margin-left: 2rem = 40px
+    assert_eq!(child_style.margin_left, LengthOrAuto::Px(40.0));
+    // text-align inherited from parent
+    assert_eq!(child_style.text_align, TextAlign::Center);
+}

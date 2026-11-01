@@ -11,8 +11,8 @@ pub mod specificity;
 pub use ast::{Declaration, Rule, Selector, StyleSheet, Stylesheet, Unit, Value};
 pub use color::Color;
 pub use computed::{
-    compute_styles, compute_styles_for_document, parse_styles_from_document, ComputedStyle,
-    Display, LengthOrAuto, StyleTree,
+    compute_styles, compute_styles_for_document, parse_styles_from_document, resolve_length,
+    resolve_length_or_auto, ComputedStyle, Display, LengthOrAuto, StyleTree, TextAlign,
 };
 pub use error::CssError;
 pub use matcher::{matches, matches_document};

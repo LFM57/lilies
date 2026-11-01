@@ -7,5 +7,7 @@ license.workspace = true
 [dependencies]
 lilies-dom.workspace = true
 lilies-css.workspace = true
+lilies-net.workspace = true
+url.workspace = true
 thiserror.workspace = true
 indexmap.workspace = true

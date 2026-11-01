@@ -834,7 +834,9 @@ dependencies = [
  "indexmap",
  "lilies-css",
  "lilies-dom",
+ "lilies-net",
  "thiserror 2.0.21",
+ "url",
 ]
 
 [[package]]

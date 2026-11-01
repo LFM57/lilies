@@ -6,6 +6,8 @@ use crate::color::Color;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Unit {
     Px,
+    Em,
+    Rem,
 }
 
 /// A parsed CSS value.
@@ -31,6 +33,17 @@ impl Value {
     pub fn to_length(&self) -> Option<f32> {
         match self {
             Value::Length(px, Unit::Px) => Some(*px),
+            _ => None,
+        }
+    }
+
+    /// Converts this value into a pixel length using the provided element font size and root font size.
+    pub fn to_length_with_context(&self, font_size: f32, root_font_size: f32) -> Option<f32> {
+        match self {
+            Value::Length(px, Unit::Px) => Some(*px),
+            Value::Length(em, Unit::Em) => Some(*em * font_size),
+            Value::Length(rem, Unit::Rem) => Some(*rem * root_font_size),
+            Value::Keyword(k) if k == "0" => Some(0.0),
             _ => None,
         }
     }
@@ -123,6 +136,14 @@ impl StyleSheet {
 
     pub fn add_rule(&mut self, rule: Rule) {
         self.rules.push(rule);
+    }
+
+    pub fn append(&mut self, mut other: StyleSheet) {
+        self.rules.append(&mut other.rules);
+    }
+
+    pub fn merge(&mut self, other: StyleSheet) {
+        self.rules.extend(other.rules);
     }
 }
 

@@ -1,8 +1,8 @@
 #![deny(unsafe_code)]
 
-use lilies_css::{compute_styles_for_document, StyleTree};
+use lilies_css::StyleTree;
 use lilies_dom::{Document, NodeId};
-use lilies_html::parse_html;
+use lilies_html::{load_styles_with_external, parse_html};
 use lilies_layout::{
     build_layout_tree, find_parent_link, hit_test, layout, Dimensions, EdgeSizes, LayoutBox, Rect,
 };
@@ -264,40 +264,7 @@ pub fn render_address_bar(
 
 /// Resolves a potentially relative `href` against the `base_url`.
 pub fn resolve_url(base_url: &str, href: &str) -> String {
-    let trimmed = href.trim();
-    if trimmed.is_empty() {
-        return base_url.to_string();
-    }
-
-    // Strip optional "(offline demo)" suffix before resolving
-    let clean_base = base_url
-        .split_once(" (offline demo)")
-        .map_or(base_url, |(b, _)| b);
-
-    if let Ok(base) = url::Url::parse(clean_base) {
-        if let Ok(resolved) = base.join(trimmed) {
-            return resolved.to_string();
-        }
-    }
-
-    // Fallback if href has explicit scheme
-    if trimmed.contains("://") || trimmed.starts_with("file:") {
-        return trimmed.to_string();
-    }
-
-    // Fallback path joining
-    if trimmed.starts_with('/') {
-        if let Some((scheme, rest)) = clean_base.split_once("://") {
-            let host = rest.split('/').next().unwrap_or(rest);
-            return format!("{}://{}{}", scheme, host, trimmed);
-        }
-    }
-
-    format!(
-        "{}/{}",
-        clean_base.trim_end_matches('/'),
-        trimmed.trim_start_matches('/')
-    )
+    lilies_html::resolve_url(base_url, href)
 }
 
 /// Normalizes typed input in the address bar into a full URL.
@@ -340,7 +307,7 @@ impl ShellState {
     pub fn new(initial_target: String) -> Self {
         let (html_content, current_url) = fetch_or_fallback(&initial_target);
         let doc = parse_html(&html_content);
-        let styles = compute_styles_for_document(&doc);
+        let styles = load_styles_with_external(&doc, &current_url);
         let html_id = find_html_root(&doc).expect("Root <html> element required in document");
 
         Self {
@@ -365,7 +332,7 @@ impl ShellState {
         println!("Navigating to: {}", target_url);
         let (html_content, loaded_url) = fetch_or_fallback(target_url);
         let doc = parse_html(&html_content);
-        let styles = compute_styles_for_document(&doc);
+        let styles = load_styles_with_external(&doc, &loaded_url);
         let Some(html_id) = find_html_root(&doc) else {
             eprintln!("Document missing <html> root element");
             return;
@@ -762,7 +729,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lilies_css::{compute_styles, parse_styles_from_document, StyleSheet};
+    use lilies_css::{
+        compute_styles, compute_styles_for_document, parse_styles_from_document, StyleSheet,
+    };
 
     #[test]
     fn test_copy_pixmap_to_softbuffer() {
@@ -1314,5 +1283,77 @@ mod tests {
             pixmap_focused.get_pixel(20, 10),
             Some(Color::rgb(0x89, 0xb4, 0xfa))
         );
+    }
+
+    #[test]
+    fn test_shell_external_stylesheet_loading_e2e() {
+        use lilies_css::TextAlign;
+        use std::fs;
+
+        let temp_dir = std::env::temp_dir().join("lilies_milestone9_test");
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let css_file = temp_dir.join("site.css");
+        let html_file = temp_dir.join("index.html");
+
+        fs::write(
+            &css_file,
+            "body { background-color: #34495e; max-width: 30em; text-align: center; }\nh1 { color: #e74c3c; font-size: 2em; }",
+        )
+        .expect("write css");
+
+        fs::write(
+            &html_file,
+            r#"<html><head><link rel="stylesheet" href="site.css"></head><body><h1>Hello World</h1></body></html>"#,
+        )
+        .expect("write html");
+
+        let target_url = format!("file://{}", html_file.display());
+        let state = ShellState::new(target_url);
+
+        // Find body and h1 in the document
+        let body_id = state
+            .doc
+            .get_children(state.html_id)
+            .into_iter()
+            .find(|&id| {
+                state
+                    .doc
+                    .node(id)
+                    .and_then(|n| n.as_element())
+                    .is_some_and(|el| el.tag_name() == "body")
+            })
+            .expect("body element");
+
+        let h1_id = state
+            .doc
+            .get_children(body_id)
+            .into_iter()
+            .find(|&id| {
+                state
+                    .doc
+                    .node(id)
+                    .and_then(|n| n.as_element())
+                    .is_some_and(|el| el.tag_name() == "h1")
+            })
+            .expect("h1 element");
+
+        let body_style = state.styles.get(body_id).expect("body style");
+        assert_eq!(
+            body_style.background_color,
+            Color::rgb(0x34, 0x49, 0x5e)
+        );
+        assert_eq!(body_style.max_width, Some(480.0)); // 30em * 16px = 480px
+        assert_eq!(body_style.text_align, TextAlign::Center);
+
+        let h1_style = state.styles.get(h1_id).expect("h1 style");
+        assert_eq!(h1_style.color, Color::rgb(0xe7, 0x4c, 0x3c));
+        assert_eq!(h1_style.font_size, 32.0); // 2em * parent (16px) = 32px
+        assert_eq!(h1_style.text_align, TextAlign::Center); // inherited from body
+
+        // Cleanup
+        let _ = fs::remove_file(css_file);
+        let _ = fs::remove_file(html_file);
+        let _ = fs::remove_dir(temp_dir);
     }
 }

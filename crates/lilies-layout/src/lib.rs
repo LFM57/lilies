@@ -12,6 +12,7 @@ pub use error::LayoutError;
 pub use font::{default_font, wrap_text, TextLine};
 pub use hit_test::{find_parent_link, hit_test};
 pub use layout_box::{BoxType, LayoutBox};
+pub use lilies_css::TextAlign;
 pub use tree_builder::build_layout_tree;
 
 /// Calculates the layout of a root box within the given initial viewport dimensions.

@@ -196,8 +196,10 @@ impl LayoutBox {
         };
 
         let is_width_auto = width.is_auto();
-        let mut is_ml_auto = margin_left.is_auto();
-        let mut is_mr_auto = margin_right.is_auto();
+        let is_ml_auto_orig = margin_left.is_auto();
+        let is_mr_auto_orig = margin_right.is_auto();
+        let mut is_ml_auto = is_ml_auto_orig;
+        let mut is_mr_auto = is_mr_auto_orig;
 
         let total =
             ml_px + border_left + padding_left + w_px + padding_right + border_right + mr_px;
@@ -263,6 +265,37 @@ impl LayoutBox {
                 self.dimensions.content.width = w_px;
                 self.dimensions.margin.left = ml_px;
                 self.dimensions.margin.right = mr_px + underflow;
+            }
+        }
+
+        let max_width = self.style.as_ref().and_then(|s| s.max_width);
+        if let Some(max_w) = max_width {
+            if self.dimensions.content.width > max_w {
+                self.dimensions.content.width = max_w;
+
+                // Recalculate horizontal auto-margins using the clamped width
+                let non_content_h = border_left + padding_left + padding_right + border_right;
+                let available_for_margins = cb_width - (max_w + non_content_h);
+
+                match (is_ml_auto_orig, is_mr_auto_orig) {
+                    (true, true) => {
+                        let half = (available_for_margins / 2.0).max(0.0);
+                        self.dimensions.margin.left = half;
+                        self.dimensions.margin.right = half;
+                    }
+                    (true, false) => {
+                        self.dimensions.margin.right = mr_px;
+                        self.dimensions.margin.left = (available_for_margins - mr_px).max(0.0);
+                    }
+                    (false, true) => {
+                        self.dimensions.margin.left = ml_px;
+                        self.dimensions.margin.right = (available_for_margins - ml_px).max(0.0);
+                    }
+                    (false, false) => {
+                        self.dimensions.margin.left = ml_px;
+                        self.dimensions.margin.right = mr_px + (available_for_margins - ml_px - mr_px);
+                    }
+                }
             }
         }
     }
@@ -365,14 +398,41 @@ impl LayoutBox {
                 self.dimensions.content.y,
             );
             if !self.lines.is_empty() {
+                let text_align = self
+                    .style
+                    .as_ref()
+                    .map_or(lilies_css::TextAlign::Left, |s| s.text_align);
+                let containing_block_width = available_width;
+                if text_align != lilies_css::TextAlign::Left {
+                    for line in &mut self.lines {
+                        let space = containing_block_width - line.rect.width;
+                        match text_align {
+                            lilies_css::TextAlign::Center => {
+                                line.rect.x += space / 2.0;
+                            }
+                            lilies_css::TextAlign::Right => {
+                                line.rect.x += space;
+                            }
+                            lilies_css::TextAlign::Left => {}
+                        }
+                    }
+                }
                 let line_h = crate::font::line_height(font_size);
                 self.dimensions.content.height = self.lines.len() as f32 * line_h;
-                let max_w = self
+                let min_x = self
                     .lines
                     .iter()
-                    .map(|l| l.rect.width)
-                    .fold(0.0f32, f32::max);
-                self.dimensions.content.width = max_w;
+                    .map(|l| l.rect.x)
+                    .fold(f32::INFINITY, f32::min);
+                let max_x = self
+                    .lines
+                    .iter()
+                    .map(|l| l.rect.x + l.rect.width)
+                    .fold(f32::NEG_INFINITY, f32::max);
+                if min_x.is_finite() && max_x.is_finite() && max_x >= min_x {
+                    self.dimensions.content.x = min_x;
+                    self.dimensions.content.width = max_x - min_x;
+                }
             }
         }
 

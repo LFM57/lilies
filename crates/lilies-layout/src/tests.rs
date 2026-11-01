@@ -769,3 +769,127 @@ fn test_find_parent_link_traversal() {
     // Paragraph does not have an enclosing link
     assert_eq!(find_parent_link(p_id, doc.arena()), None);
 }
+
+#[test]
+fn test_max_width_clamping_and_centering_with_margin_auto() {
+    use lilies_css::{ComputedStyle, LengthOrAuto};
+    use lilies_dom::NodeId;
+
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0));
+
+    // Case 1: width: auto, max-width: 400px, margin: auto in 800px container
+    let style1 = ComputedStyle {
+        width: LengthOrAuto::Auto,
+        max_width: Some(400.0),
+        margin_left: LengthOrAuto::Auto,
+        margin_right: LengthOrAuto::Auto,
+        ..Default::default()
+    };
+    let mut box1 = LayoutBox::new(BoxType::BlockNode(NodeId(1))).with_style(style1.clone());
+    box1.calculate_block_width(&cb);
+    box1.calculate_block_position(&cb);
+
+    assert_eq!(box1.dimensions.content.width, 400.0);
+    assert_eq!(box1.dimensions.margin.left, 200.0);
+    assert_eq!(box1.dimensions.margin.right, 200.0);
+    assert_eq!(box1.dimensions.content.x, 200.0);
+
+    // Case 2: Fixed width: 600px clamped to max-width: 400px, margin: auto
+    let style2 = ComputedStyle {
+        width: LengthOrAuto::Px(600.0),
+        max_width: Some(400.0),
+        margin_left: LengthOrAuto::Auto,
+        margin_right: LengthOrAuto::Auto,
+        ..Default::default()
+    };
+    let mut box2 = LayoutBox::new(BoxType::BlockNode(NodeId(2))).with_style(style2);
+    box2.calculate_block_width(&cb);
+    box2.calculate_block_position(&cb);
+
+    assert_eq!(box2.dimensions.content.width, 400.0);
+    assert_eq!(box2.dimensions.margin.left, 200.0);
+    assert_eq!(box2.dimensions.margin.right, 200.0);
+    assert_eq!(box2.dimensions.content.x, 200.0);
+
+    // Case 3: Narrow container (300px) smaller than max-width (400px)
+    let narrow_cb = Dimensions::new(Rect::new(0.0, 0.0, 300.0, 600.0));
+    let mut box3 = LayoutBox::new(BoxType::BlockNode(NodeId(3))).with_style(style1);
+    box3.calculate_block_width(&narrow_cb);
+    box3.calculate_block_position(&narrow_cb);
+
+    // 300px <= 400px, so not clamped
+    assert_eq!(box3.dimensions.content.width, 300.0);
+    assert_eq!(box3.dimensions.margin.left, 0.0);
+    assert_eq!(box3.dimensions.margin.right, 0.0);
+    assert_eq!(box3.dimensions.content.x, 0.0);
+}
+
+#[test]
+fn test_text_align_center_and_right_line_coordinate_positioning() {
+    use crate::font::measure_text;
+    use lilies_css::{ComputedStyle, TextAlign};
+    use lilies_dom::NodeId;
+
+    let cb = Dimensions::new(Rect::new(50.0, 20.0, 400.0, 300.0));
+    let text = "Hello Lilies Browser".to_string();
+    let font_size = 16.0;
+    let expected_text_width = measure_text(&text, font_size);
+    let space = cb.content.width - expected_text_width;
+
+    // Center alignment
+    let style_center = ComputedStyle {
+        font_size,
+        text_align: TextAlign::Center,
+        ..Default::default()
+    };
+    let mut box_center = LayoutBox::new(BoxType::InlineNode(NodeId(1)))
+        .with_text(text.clone())
+        .with_style(style_center);
+    box_center.layout_inline(cb);
+
+    assert_eq!(box_center.lines.len(), 1);
+    let line_center = &box_center.lines[0];
+    let expected_center_x = cb.content.x + space / 2.0;
+    assert!(
+        (line_center.rect.x - expected_center_x).abs() < 0.01,
+        "Center aligned line x was {}, expected {}",
+        line_center.rect.x,
+        expected_center_x
+    );
+
+    // Right alignment
+    let style_right = ComputedStyle {
+        font_size,
+        text_align: TextAlign::Right,
+        ..Default::default()
+    };
+    let mut box_right = LayoutBox::new(BoxType::InlineNode(NodeId(2)))
+        .with_text(text.clone())
+        .with_style(style_right);
+    box_right.layout_inline(cb);
+
+    assert_eq!(box_right.lines.len(), 1);
+    let line_right = &box_right.lines[0];
+    let expected_right_x = cb.content.x + space;
+    assert!(
+        (line_right.rect.x - expected_right_x).abs() < 0.01,
+        "Right aligned line x was {}, expected {}",
+        line_right.rect.x,
+        expected_right_x
+    );
+
+    // Left alignment
+    let style_left = ComputedStyle {
+        font_size,
+        text_align: TextAlign::Left,
+        ..Default::default()
+    };
+    let mut box_left = LayoutBox::new(BoxType::InlineNode(NodeId(3)))
+        .with_text(text)
+        .with_style(style_left);
+    box_left.layout_inline(cb);
+
+    assert_eq!(box_left.lines.len(), 1);
+    let line_left = &box_left.lines[0];
+    assert_eq!(line_left.rect.x, cb.content.x);
+}

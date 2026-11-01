@@ -37,12 +37,22 @@ impl LengthOrAuto {
     }
 }
 
+/// CSS `text-align` property values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextAlign {
+    #[default]
+    Left,
+    Center,
+    Right,
+}
+
 /// Computed styles for a DOM element after cascade and inheritance.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ComputedStyle {
     pub display: Display,
     pub width: LengthOrAuto,
     pub height: LengthOrAuto,
+    pub max_width: Option<f32>,
     pub margin_top: LengthOrAuto,
     pub margin_right: LengthOrAuto,
     pub margin_bottom: LengthOrAuto,
@@ -54,6 +64,7 @@ pub struct ComputedStyle {
     pub background_color: Color,
     pub color: Color,
     pub font_size: f32,
+    pub text_align: TextAlign,
 }
 
 impl Default for ComputedStyle {
@@ -62,6 +73,7 @@ impl Default for ComputedStyle {
             display: Display::Inline,
             width: LengthOrAuto::Auto,
             height: LengthOrAuto::Auto,
+            max_width: None,
             margin_top: LengthOrAuto::Px(0.0),
             margin_right: LengthOrAuto::Px(0.0),
             margin_bottom: LengthOrAuto::Px(0.0),
@@ -73,6 +85,7 @@ impl Default for ComputedStyle {
             background_color: Color::TRANSPARENT,
             color: Color::BLACK,
             font_size: 16.0,
+            text_align: TextAlign::Left,
         }
     }
 }
@@ -108,6 +121,18 @@ impl ComputedStyle {
 
     /// Updates this computed style with a matched CSS property declaration.
     pub fn apply_declaration(&mut self, declaration: &Declaration) {
+        self.apply_declaration_with_context(declaration, self.font_size, 16.0);
+    }
+
+    /// Updates this computed style with a matched CSS property declaration,
+    /// resolving relative units (`em`/`rem`) using the parent font size (for `font-size`)
+    /// and the root document font size.
+    pub fn apply_declaration_with_context(
+        &mut self,
+        declaration: &Declaration,
+        parent_font_size: f32,
+        root_font_size: f32,
+    ) {
         let prop = declaration.name.to_ascii_lowercase();
         let val = &declaration.value;
 
@@ -124,13 +149,26 @@ impl ComputedStyle {
             }
 
             "width" => {
-                if let Some(l) = parse_length_or_auto(val) {
+                if let Some(l) = resolve_length_or_auto(val, self.font_size, root_font_size) {
                     self.width = l;
                 }
             }
 
+            "max-width" => {
+                if let Some(l) = resolve_length_or_auto(val, self.font_size, root_font_size) {
+                    self.max_width = match l {
+                        LengthOrAuto::Px(px) => Some(px.max(0.0)),
+                        LengthOrAuto::Auto => None,
+                    };
+                } else if let Some(k) = val.as_keyword() {
+                    if k.eq_ignore_ascii_case("none") {
+                        self.max_width = None;
+                    }
+                }
+            }
+
             "height" => {
-                if let Some(l) = parse_length_or_auto(val) {
+                if let Some(l) = resolve_length_or_auto(val, self.font_size, root_font_size) {
                     self.height = l;
                 }
             }
@@ -142,8 +180,38 @@ impl ComputedStyle {
             }
 
             "font-size" => {
-                if let Some(p) = parse_length(val) {
+                if let Some(p) = resolve_length(val, parent_font_size, root_font_size) {
                     self.font_size = p;
+                }
+            }
+
+            "font" => {
+                match val {
+                    Value::Length(_, _) => {
+                        if let Some(p) = resolve_length(val, parent_font_size, root_font_size) {
+                            self.font_size = p;
+                        }
+                    }
+                    Value::List(items) => {
+                        for item in items {
+                            if let Some(p) = resolve_length(item, parent_font_size, root_font_size) {
+                                self.font_size = p;
+                                break;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            "text-align" => {
+                if let Some(k) = val.as_keyword() {
+                    match k.to_ascii_lowercase().as_str() {
+                        "left" => self.text_align = TextAlign::Left,
+                        "center" => self.text_align = TextAlign::Center,
+                        "right" => self.text_align = TextAlign::Right,
+                        _ => {}
+                    }
                 }
             }
 
@@ -154,64 +222,67 @@ impl ComputedStyle {
             }
 
             "margin-top" => {
-                if let Some(l) = parse_length_or_auto(val) {
+                if let Some(l) = resolve_length_or_auto(val, self.font_size, root_font_size) {
                     self.margin_top = l;
                 }
             }
             "margin-right" => {
-                if let Some(l) = parse_length_or_auto(val) {
+                if let Some(l) = resolve_length_or_auto(val, self.font_size, root_font_size) {
                     self.margin_right = l;
                 }
             }
             "margin-bottom" => {
-                if let Some(l) = parse_length_or_auto(val) {
+                if let Some(l) = resolve_length_or_auto(val, self.font_size, root_font_size) {
                     self.margin_bottom = l;
                 }
             }
             "margin-left" => {
-                if let Some(l) = parse_length_or_auto(val) {
+                if let Some(l) = resolve_length_or_auto(val, self.font_size, root_font_size) {
                     self.margin_left = l;
                 }
             }
 
             "margin" => {
-                self.apply_margin_shorthand(val);
+                self.apply_margin_shorthand(val, root_font_size);
             }
 
             "padding-top" => {
-                if let Some(p) = parse_length(val) {
+                if let Some(p) = resolve_length(val, self.font_size, root_font_size) {
                     self.padding_top = p;
                 }
             }
             "padding-right" => {
-                if let Some(p) = parse_length(val) {
+                if let Some(p) = resolve_length(val, self.font_size, root_font_size) {
                     self.padding_right = p;
                 }
             }
             "padding-bottom" => {
-                if let Some(p) = parse_length(val) {
+                if let Some(p) = resolve_length(val, self.font_size, root_font_size) {
                     self.padding_bottom = p;
                 }
             }
             "padding-left" => {
-                if let Some(p) = parse_length(val) {
+                if let Some(p) = resolve_length(val, self.font_size, root_font_size) {
                     self.padding_left = p;
                 }
             }
 
             "padding" => {
-                self.apply_padding_shorthand(val);
+                self.apply_padding_shorthand(val, root_font_size);
             }
 
             _ => {}
         }
     }
 
-    fn apply_margin_shorthand(&mut self, val: &Value) {
+    fn apply_margin_shorthand(&mut self, val: &Value, root_font_size: f32) {
+        let f_size = self.font_size;
         match val {
             Value::List(items) => {
-                let parsed: Vec<Option<LengthOrAuto>> =
-                    items.iter().map(parse_length_or_auto).collect();
+                let parsed: Vec<Option<LengthOrAuto>> = items
+                    .iter()
+                    .map(|v| resolve_length_or_auto(v, f_size, root_font_size))
+                    .collect();
                 match parsed.as_slice() {
                     [Some(top_bottom), Some(right_left)] => {
                         self.margin_top = *top_bottom;
@@ -235,7 +306,7 @@ impl ComputedStyle {
                 }
             }
             single => {
-                if let Some(l) = parse_length_or_auto(single) {
+                if let Some(l) = resolve_length_or_auto(single, f_size, root_font_size) {
                     self.margin_top = l;
                     self.margin_right = l;
                     self.margin_bottom = l;
@@ -245,10 +316,14 @@ impl ComputedStyle {
         }
     }
 
-    fn apply_padding_shorthand(&mut self, val: &Value) {
+    fn apply_padding_shorthand(&mut self, val: &Value, root_font_size: f32) {
+        let f_size = self.font_size;
         match val {
             Value::List(items) => {
-                let parsed: Vec<Option<f32>> = items.iter().map(parse_length).collect();
+                let parsed: Vec<Option<f32>> = items
+                    .iter()
+                    .map(|v| resolve_length(v, f_size, root_font_size))
+                    .collect();
                 match parsed.as_slice() {
                     [Some(top_bottom), Some(right_left)] => {
                         self.padding_top = *top_bottom;
@@ -272,7 +347,7 @@ impl ComputedStyle {
                 }
             }
             single => {
-                if let Some(p) = parse_length(single) {
+                if let Some(p) = resolve_length(single, f_size, root_font_size) {
                     self.padding_top = p;
                     self.padding_right = p;
                     self.padding_bottom = p;
@@ -283,21 +358,39 @@ impl ComputedStyle {
     }
 }
 
-fn parse_length_or_auto(val: &Value) -> Option<LengthOrAuto> {
+/// Resolves a CSS length or `auto` keyword into `LengthOrAuto` using element font-size and root font-size.
+pub fn resolve_length_or_auto(
+    val: &Value,
+    font_size: f32,
+    root_font_size: f32,
+) -> Option<LengthOrAuto> {
     match val {
         Value::Keyword(k) if k.eq_ignore_ascii_case("auto") => Some(LengthOrAuto::Auto),
         Value::Keyword(k) if k == "0" => Some(LengthOrAuto::Px(0.0)),
         Value::Length(px, Unit::Px) => Some(LengthOrAuto::Px(*px)),
+        Value::Length(em, Unit::Em) => Some(LengthOrAuto::Px(*em * font_size)),
+        Value::Length(rem, Unit::Rem) => Some(LengthOrAuto::Px(*rem * root_font_size)),
         _ => None,
     }
 }
 
-fn parse_length(val: &Value) -> Option<f32> {
+/// Resolves a CSS length value into concrete pixels using element font-size and root font-size.
+pub fn resolve_length(val: &Value, font_size: f32, root_font_size: f32) -> Option<f32> {
     match val {
         Value::Length(px, Unit::Px) => Some(*px),
+        Value::Length(em, Unit::Em) => Some(*em * font_size),
+        Value::Length(rem, Unit::Rem) => Some(*rem * root_font_size),
         Value::Keyword(k) if k == "0" => Some(0.0),
         _ => None,
     }
+}
+
+pub fn parse_length_or_auto(val: &Value) -> Option<LengthOrAuto> {
+    resolve_length_or_auto(val, 16.0, 16.0)
+}
+
+pub fn parse_length(val: &Value) -> Option<f32> {
+    resolve_length(val, 16.0, 16.0)
 }
 
 /// Storage container for all computed styles across the document.
@@ -347,8 +440,55 @@ impl StyleTree {
 pub fn compute_styles(doc: &Document, stylesheet: &StyleSheet) -> StyleTree {
     let mut style_tree = StyleTree::new();
     let root = doc.root();
-    compute_node(root, None, doc, stylesheet, &mut style_tree);
+    let root_font_size = determine_root_font_size(doc, stylesheet);
+    compute_node(root, None, root_font_size, doc, stylesheet, &mut style_tree);
     style_tree
+}
+
+fn determine_root_font_size(doc: &Document, stylesheet: &StyleSheet) -> f32 {
+    let mut root_font_size = 16.0f32;
+    for child in doc.get_children(doc.root()) {
+        if let Some(node) = doc.node(child) {
+            if let Some(el) = node.as_element() {
+                let mut matched: Vec<(Specificity, usize, &Declaration)> = Vec::new();
+                for (rule_idx, rule) in stylesheet.rules.iter().enumerate() {
+                    let best_spec = rule
+                        .selectors
+                        .iter()
+                        .filter(|sel| matches(sel, child, doc.arena()))
+                        .map(|sel| sel.specificity())
+                        .max();
+
+                    if let Some(spec) = best_spec {
+                        for decl in &rule.declarations {
+                            let name = decl.name.to_ascii_lowercase();
+                            if name == "font-size" || name == "font" {
+                                matched.push((spec, rule_idx, decl));
+                            }
+                        }
+                    }
+                }
+                matched.sort_by(|(s1, r1, _), (s2, r2, _)| s1.cmp(s2).then_with(|| r1.cmp(r2)));
+                let mut dummy_style = ComputedStyle::default_for_tag(el.tag_name());
+                for (_, _, decl) in matched {
+                    dummy_style.apply_declaration_with_context(decl, 16.0, 16.0);
+                }
+                if let Some(style_attr) = el.get_attribute("style") {
+                    if let Ok(inline_decls) = crate::parser::parse_declarations(style_attr) {
+                        for decl in &inline_decls {
+                            let name = decl.name.to_ascii_lowercase();
+                            if name == "font-size" || name == "font" {
+                                dummy_style.apply_declaration_with_context(decl, 16.0, 16.0);
+                            }
+                        }
+                    }
+                }
+                root_font_size = dummy_style.font_size;
+                break;
+            }
+        }
+    }
+    root_font_size
 }
 
 /// Traverses the document tree to find all `<style>` elements, extracts their text,
@@ -400,6 +540,7 @@ fn collect_text_nodes(doc: &Document, node_id: NodeId, out: &mut String) {
 fn compute_node(
     node_id: NodeId,
     parent_style: Option<&ComputedStyle>,
+    root_font_size: f32,
     doc: &Document,
     stylesheet: &StyleSheet,
     style_tree: &mut StyleTree,
@@ -407,6 +548,8 @@ fn compute_node(
     let Some(node) = doc.node(node_id) else {
         return;
     };
+
+    let parent_font_size = parent_style.map_or(16.0, |p| p.font_size);
 
     if let Some(element) = node.as_element() {
         let mut style = ComputedStyle::default_for_tag(element.tag_name());
@@ -416,6 +559,7 @@ fn compute_node(
         // Apply inheritable properties from parent
         if let Some(parent) = parent_style {
             style.color = parent.color;
+            style.text_align = parent.text_align;
             if !is_heading {
                 style.font_size = parent.font_size;
             }
@@ -441,17 +585,36 @@ fn compute_node(
         // Sort by specificity ascending, then by rule index (document order) ascending
         matched.sort_by(|(s1, r1, _), (s2, r2, _)| s1.cmp(s2).then_with(|| r1.cmp(r2)));
 
-        // Apply matched declarations in cascading order
-        for (_, _, decl) in matched {
-            style.apply_declaration(decl);
+        let inline_decls = element
+            .get_attribute("style")
+            .and_then(|attr| crate::parser::parse_declarations(attr).ok())
+            .unwrap_or_default();
+
+        // Pass 1: Apply font-size / font declarations first so element's font_size is established
+        for (_, _, decl) in &matched {
+            let name = decl.name.to_ascii_lowercase();
+            if name == "font-size" || name == "font" {
+                style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
+            }
+        }
+        for decl in &inline_decls {
+            let name = decl.name.to_ascii_lowercase();
+            if name == "font-size" || name == "font" {
+                style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
+            }
         }
 
-        // Apply inline style attribute with highest priority
-        if let Some(style_attr) = element.get_attribute("style") {
-            if let Ok(inline_decls) = crate::parser::parse_declarations(style_attr) {
-                for decl in &inline_decls {
-                    style.apply_declaration(decl);
-                }
+        // Pass 2: Apply all remaining declarations in cascading order
+        for (_, _, decl) in &matched {
+            let name = decl.name.to_ascii_lowercase();
+            if name != "font-size" && name != "font" {
+                style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
+            }
+        }
+        for decl in &inline_decls {
+            let name = decl.name.to_ascii_lowercase();
+            if name != "font-size" && name != "font" {
+                style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
             }
         }
 
@@ -459,7 +622,7 @@ fn compute_node(
 
         // Recurse for all children
         for child_id in doc.get_children(node_id) {
-            compute_node(child_id, Some(&style), doc, stylesheet, style_tree);
+            compute_node(child_id, Some(&style), root_font_size, doc, stylesheet, style_tree);
         }
     } else {
         // Document node, text node, comment, or doctype
@@ -468,13 +631,14 @@ fn compute_node(
                 display: Display::Inline,
                 font_size: parent_style.map_or(16.0, |p| p.font_size),
                 color: parent_style.map_or(Color::BLACK, |p| p.color),
+                text_align: parent_style.map_or(TextAlign::Left, |p| p.text_align),
                 ..Default::default()
             };
             style_tree.insert(node_id, text_style);
         }
 
         for child_id in doc.get_children(node_id) {
-            compute_node(child_id, parent_style, doc, stylesheet, style_tree);
+            compute_node(child_id, parent_style, root_font_size, doc, stylesheet, style_tree);
         }
     }
 }
