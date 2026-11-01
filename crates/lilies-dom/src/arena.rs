@@ -1,7 +1,7 @@
 #![deny(unsafe_code)]
 
-use std::fmt;
 use crate::node::Node;
+use std::fmt;
 
 /// Unique identifier for a node within a DOM arena.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

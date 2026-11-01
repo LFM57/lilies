@@ -58,7 +58,8 @@ impl Document {
         attributes: IndexMap<String, String>,
     ) -> NodeId {
         let element = Element::with_attributes(tag_name, attributes);
-        self.arena.alloc(|id| Node::new(id, NodeType::Element(element)))
+        self.arena
+            .alloc(|id| Node::new(id, NodeType::Element(element)))
     }
 
     /// Creates a Text node and returns its `NodeId`.
@@ -355,7 +356,11 @@ impl Document {
                         .iter()
                         .map(|(k, v)| format!("{k}=\"{v}\""))
                         .collect();
-                    out.push_str(&format!("{indent}<{} {}>\n", el.tag_name, attrs_str.join(" ")));
+                    out.push_str(&format!(
+                        "{indent}<{} {}>\n",
+                        el.tag_name,
+                        attrs_str.join(" ")
+                    ));
                 }
             }
             NodeType::Text(text) => {
