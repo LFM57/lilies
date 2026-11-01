@@ -94,6 +94,117 @@ impl InputStream {
             false
         }
     }
+
+    /// Attempts to consume an HTML character reference immediately after `'&'` has been consumed.
+    /// If valid, advances `self.pos` past the reference (including trailing `;`) and returns the decoded string.
+    /// Otherwise leaves `self.pos` unchanged and returns `None`.
+    fn try_consume_char_ref(&mut self) -> Option<String> {
+        let start_pos = self.pos;
+
+        if self.chars.get(start_pos) == Some(&'#') {
+            let mut p = start_pos + 1;
+            let (radix, digit_start) = if matches!(self.chars.get(p), Some('x' | 'X')) {
+                p += 1;
+                while self.chars.get(p).is_some_and(|c| c.is_ascii_hexdigit()) {
+                    p += 1;
+                }
+                (16, start_pos + 2)
+            } else {
+                while self.chars.get(p).is_some_and(|c| c.is_ascii_digit()) {
+                    p += 1;
+                }
+                (10, start_pos + 1)
+            };
+
+            if p > digit_start {
+                let num_str: String = self.chars[digit_start..p].iter().collect();
+                if self.chars.get(p) == Some(&';') {
+                    p += 1;
+                }
+                if let Ok(code) = u32::from_str_radix(&num_str, radix) {
+                    let ch = if code == 0 {
+                        '\u{FFFD}'
+                    } else {
+                        char::from_u32(code).unwrap_or('\u{FFFD}')
+                    };
+                    self.pos = p;
+                    return Some(ch.to_string());
+                }
+            }
+            return None;
+        }
+
+        let mut p = start_pos;
+        while self.chars.get(p).is_some_and(|c| c.is_ascii_alphanumeric()) {
+            p += 1;
+        }
+
+        if p > start_pos && self.chars.get(p) == Some(&';') {
+            let name: String = self.chars[start_pos..p].iter().collect();
+            if let Some(decoded) = lookup_named_entity(&name) {
+                self.pos = p + 1;
+                return Some(decoded.to_string());
+            }
+        }
+
+        None
+    }
+}
+
+fn lookup_named_entity(name: &str) -> Option<&'static str> {
+    match name {
+        "amp" | "AMP" => Some("&"),
+        "lt" | "LT" => Some("<"),
+        "gt" | "GT" => Some(">"),
+        "quot" | "QUOT" => Some("\""),
+        "apos" => Some("'"),
+        "nbsp" | "NBSP" => Some("\u{00A0}"),
+        "ensp" => Some("\u{2002}"),
+        "emsp" => Some("\u{2003}"),
+        "thinsp" => Some("\u{2009}"),
+        "zwnj" => Some("\u{200C}"),
+        "zwj" => Some("\u{200D}"),
+        "ndash" => Some("\u{2013}"),
+        "mdash" => Some("\u{2014}"),
+        "hellip" => Some("\u{2026}"),
+        "lsquo" => Some("\u{2018}"),
+        "rsquo" => Some("\u{2019}"),
+        "ldquo" => Some("\u{201C}"),
+        "rdquo" => Some("\u{201D}"),
+        "laquo" => Some("\u{00AB}"),
+        "raquo" => Some("\u{00BB}"),
+        "bull" => Some("\u{2022}"),
+        "middot" => Some("\u{00B7}"),
+        "sect" => Some("\u{00A7}"),
+        "para" => Some("\u{00B6}"),
+        "dagger" => Some("\u{2020}"),
+        "Dagger" => Some("\u{2021}"),
+        "copy" | "COPY" => Some("\u{00A9}"),
+        "reg" | "REG" => Some("\u{00AE}"),
+        "trade" | "TRADE" => Some("\u{2122}"),
+        "deg" => Some("\u{00B0}"),
+        "plusmn" => Some("\u{00B1}"),
+        "times" => Some("\u{00D7}"),
+        "divide" => Some("\u{00F7}"),
+        "frac12" => Some("\u{00BD}"),
+        "frac14" => Some("\u{00BC}"),
+        "frac34" => Some("\u{00BE}"),
+        "cent" => Some("\u{00A2}"),
+        "pound" => Some("\u{00A3}"),
+        "yen" => Some("\u{00A5}"),
+        "euro" => Some("\u{20AC}"),
+        "larr" => Some("\u{2190}"),
+        "uarr" => Some("\u{2191}"),
+        "rarr" => Some("\u{2192}"),
+        "darr" => Some("\u{2193}"),
+        "harr" => Some("\u{2194}"),
+        "hearts" => Some("\u{2665}"),
+        "spades" => Some("\u{2660}"),
+        "clubs" => Some("\u{2663}"),
+        "diams" => Some("\u{2666}"),
+        "check" => Some("\u{2713}"),
+        _ => None,
+    }
 }
 
 /// Tokenizer that parses an HTML string into a stream of `Token`s
@@ -185,6 +296,15 @@ impl Tokenizer {
             TokenizerState::Data => match ch {
                 Some('<') => {
                     self.state = TokenizerState::TagOpen;
+                }
+                Some('&') => {
+                    if let Some(decoded) = self.stream.try_consume_char_ref() {
+                        for dc in decoded.chars() {
+                            self.tokens.push_back(Token::Character(dc));
+                        }
+                    } else {
+                        self.tokens.push_back(Token::Character('&'));
+                    }
                 }
                 Some(c) => {
                     self.tokens.push_back(Token::Character(c));
@@ -365,6 +485,13 @@ impl Tokenizer {
                     self.commit_attribute();
                     self.state = TokenizerState::AfterAttributeValueQuoted;
                 }
+                Some('&') => {
+                    if let Some(decoded) = self.stream.try_consume_char_ref() {
+                        self.current_attr_value.push_str(&decoded);
+                    } else {
+                        self.current_attr_value.push('&');
+                    }
+                }
                 Some(c) => {
                     self.current_attr_value.push(c);
                 }
@@ -379,6 +506,13 @@ impl Tokenizer {
                 Some('\'') => {
                     self.commit_attribute();
                     self.state = TokenizerState::AfterAttributeValueQuoted;
+                }
+                Some('&') => {
+                    if let Some(decoded) = self.stream.try_consume_char_ref() {
+                        self.current_attr_value.push_str(&decoded);
+                    } else {
+                        self.current_attr_value.push('&');
+                    }
                 }
                 Some(c) => {
                     self.current_attr_value.push(c);
@@ -398,6 +532,13 @@ impl Tokenizer {
                 Some('>') => {
                     self.state = TokenizerState::Data;
                     self.emit_current_tag();
+                }
+                Some('&') => {
+                    if let Some(decoded) = self.stream.try_consume_char_ref() {
+                        self.current_attr_value.push_str(&decoded);
+                    } else {
+                        self.current_attr_value.push('&');
+                    }
                 }
                 Some(c) => {
                     self.current_attr_value.push(c);
@@ -716,6 +857,17 @@ impl Tokenizer {
                         }
                     } else {
                         self.tokens.push_back(Token::Character('<'));
+                    }
+                }
+                Some('&')
+                    if self.raw_tag_name == "title" || self.raw_tag_name == "textarea" =>
+                {
+                    if let Some(decoded) = self.stream.try_consume_char_ref() {
+                        for dc in decoded.chars() {
+                            self.tokens.push_back(Token::Character(dc));
+                        }
+                    } else {
+                        self.tokens.push_back(Token::Character('&'));
                     }
                 }
                 Some(c) => {

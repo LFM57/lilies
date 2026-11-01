@@ -46,16 +46,28 @@ pub fn parse_html(input: &str) -> Document {
                         stack.truncate(p_idx);
                     }
                 } else if name.eq_ignore_ascii_case("li") {
-                    // Auto-close preceding <li> inside the same list
-                    if let Some(li_idx) = stack.iter().rposition(|&id| {
+                    // Auto-close preceding <li> inside the same list (stop at enclosing <ul>, <ol>, or <menu>)
+                    let mut li_idx = None;
+                    for (idx, &id) in stack.iter().enumerate().rev() {
                         if id == root {
-                            return false;
+                            break;
                         }
-                        doc.node(id)
-                            .and_then(|n| n.as_element())
-                            .is_some_and(|el| el.tag_name().eq_ignore_ascii_case("li"))
-                    }) {
-                        stack.truncate(li_idx);
+                        if let Some(el) = doc.node(id).and_then(|n| n.as_element()) {
+                            let tag = el.tag_name();
+                            if tag.eq_ignore_ascii_case("li") {
+                                li_idx = Some(idx);
+                                break;
+                            }
+                            if tag.eq_ignore_ascii_case("ul")
+                                || tag.eq_ignore_ascii_case("ol")
+                                || tag.eq_ignore_ascii_case("menu")
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    if let Some(idx) = li_idx {
+                        stack.truncate(idx);
                     }
                 }
 

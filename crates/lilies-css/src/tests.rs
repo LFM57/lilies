@@ -264,6 +264,27 @@ fn test_inline_style_attribute_overrides() {
 }
 
 #[test]
+fn test_inline_style_error_recovery_preserves_valid_declarations() {
+    let mut doc = Document::new();
+    let root = doc.root();
+
+    let mut attrs = IndexMap::new();
+    attrs.insert(
+        "style".to_string(),
+        "color: ; width: 250px; invalid-prop; height: 80px".to_string(),
+    );
+    let div = doc.create_element("div", attrs);
+    doc.append_child(root, div).unwrap();
+
+    let stylesheet = parse_stylesheet("").unwrap();
+    let styles = compute_styles(&doc, &stylesheet);
+    let div_style = styles.get(div).unwrap();
+
+    assert_eq!(div_style.width, LengthOrAuto::Px(250.0));
+    assert_eq!(div_style.height, LengthOrAuto::Px(80.0));
+}
+
+#[test]
 fn test_parse_real_world_css_example_com() {
     let css = r#"html{color-scheme:light dark;background:light-dark(#eee,#222)}body{font:16px/1.6 system-ui,sans-serif;max-width:26em;margin:auto;padding:25vh 2em 2em;text-align:center}"#;
     let stylesheet = parse_stylesheet(css).expect("parse example.com css");
@@ -446,4 +467,64 @@ fn test_flexbox_css_properties_parsing_and_computing() {
     let item_style = styles.get(item).expect("item style");
     assert_eq!(item_style.flex_grow, 2.5);
     assert_eq!(item_style.gap, 10.0);
+}
+
+#[test]
+fn test_at_rules_descendant_selectors_important_and_borders() {
+    let mut doc = Document::new();
+    let root = doc.root();
+
+    let mut container_attrs = IndexMap::new();
+    container_attrs.insert("class".to_string(), "container".to_string());
+    let container = doc.create_element("div", container_attrs);
+    doc.append_child(root, container).unwrap();
+
+    let p = doc.create_element("p", IndexMap::new());
+    doc.append_child(container, p).unwrap();
+
+    let mut a_attrs = IndexMap::new();
+    a_attrs.insert("href".to_string(), "https://example.com".to_string());
+    let a = doc.create_element("a", a_attrs);
+    doc.append_child(p, a).unwrap();
+
+    let css = r#"
+        @charset "utf-8";
+        @import "reset.css";
+
+        .container {
+            border: 2px solid #ff0000;
+            color: green !important;
+        }
+        #override-attempt.container {
+            color: yellow;
+        }
+        div p {
+            border-bottom: 4px solid blue;
+        }
+        p > a, a:visited, a:hover {
+            color: rgb(10, 20, 30);
+        }
+    "#;
+
+    let stylesheet = parse_stylesheet(css).expect("parse stylesheet");
+    // All 4 style rules after @charset and @import must be preserved
+    assert_eq!(stylesheet.rules.len(), 4);
+
+    let styles = compute_styles(&doc, &stylesheet);
+
+    let container_style = styles.get(container).expect("container style");
+    assert_eq!(container_style.border_top, 2.0);
+    assert_eq!(container_style.border_right, 2.0);
+    assert_eq!(container_style.border_bottom, 2.0);
+    assert_eq!(container_style.border_left, 2.0);
+    assert_eq!(container_style.border_color, Some(Color::RED));
+    assert_eq!(container_style.color, Color::GREEN);
+
+    let p_style = styles.get(p).expect("p style");
+    assert_eq!(p_style.border_bottom, 4.0);
+    assert_eq!(p_style.border_top, 0.0);
+    assert_eq!(p_style.border_color, Some(Color::BLUE));
+
+    let a_style = styles.get(a).expect("a style");
+    assert_eq!(a_style.color, Color::rgb(10, 20, 30));
 }

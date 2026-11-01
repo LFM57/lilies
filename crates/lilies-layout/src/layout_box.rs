@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 
-use crate::box_model::Dimensions;
+use crate::box_model::{Dimensions, Rect};
 use crate::font::TextLine;
 use lilies_css::{
     AlignItems, ComputedStyle, Display, FlexDirection, JustifyContent, LengthOrAuto,
@@ -235,6 +235,11 @@ impl LayoutBox {
             self.dimensions.padding.left = style.padding_left;
             self.dimensions.padding.right = style.padding_right;
 
+            self.dimensions.border.top = style.border_top;
+            self.dimensions.border.bottom = style.border_bottom;
+            self.dimensions.border.left = style.border_left;
+            self.dimensions.border.right = style.border_right;
+
             self.dimensions.margin.top = match style.margin_top {
                 LengthOrAuto::Px(v) => v,
                 LengthOrAuto::Auto => 0.0,
@@ -385,10 +390,155 @@ impl LayoutBox {
     pub fn layout_block_children(&mut self) {
         self.dimensions.content.height = 0.0;
 
+        if !self.children.is_empty() && self.children.iter().all(|c| c.is_inline()) {
+            let available_w = self.dimensions.content.width;
+            let (_, total_h) = self.layout_inline_children_flow(available_w, true);
+            self.dimensions.content.height = total_h;
+            return;
+        }
+
         for child in &mut self.children {
             child.layout(self.dimensions);
             self.dimensions.content.height += child.dimensions.margin_box().height;
         }
+    }
+
+    fn starts_with_whitespace(&self) -> bool {
+        if let Some(ref t) = self.text {
+            return t.chars().next().is_some_and(|c| c.is_whitespace());
+        }
+        self.children
+            .first()
+            .is_some_and(|c| c.starts_with_whitespace())
+    }
+
+    fn ends_with_whitespace(&self) -> bool {
+        if let Some(ref t) = self.text {
+            return t.chars().last().is_some_and(|c| c.is_whitespace());
+        }
+        self.children
+            .last()
+            .is_some_and(|c| c.ends_with_whitespace())
+    }
+
+    fn layout_child_in_inline_flow(&mut self, containing_block: Dimensions) {
+        if self
+            .style
+            .as_ref()
+            .is_some_and(|s| s.display == Display::Flex)
+        {
+            self.layout_flex(&containing_block);
+            return;
+        }
+        match &self.box_type {
+            BoxType::BlockNode(_) | BoxType::AnonymousBlock => self.layout_block(containing_block),
+            BoxType::InlineNode(_) => self.layout_inline_in_flow(containing_block, false),
+            BoxType::ImageNode(..) => self.layout_image_in_flow(containing_block, false),
+        }
+    }
+
+    /// Lays out inline children horizontally across lines, wrapping when exceeding `available_width`.
+    /// Returns `(max_line_width, total_height)`.
+    fn layout_inline_children_flow(
+        &mut self,
+        available_width: f32,
+        align_lines: bool,
+    ) -> (f32, f32) {
+        let start_x = self.dimensions.content.x;
+        let start_y = self.dimensions.content.y;
+        let font_size = self.style.as_ref().map_or(16.0, |s| s.font_size);
+        let space_w = crate::font::measure_char(' ', font_size);
+
+        let mut cursor_x = 0.0f32;
+        let mut cursor_y = 0.0f32;
+        let mut line_h = 0.0f32;
+        let mut line_start = 0usize;
+        let mut max_w = 0.0f32;
+        let mut lines_ranges: Vec<(usize, usize, f32)> = Vec::new();
+
+        for i in 0..self.children.len() {
+            let gap_before = if i > line_start
+                && (self.children[i - 1].ends_with_whitespace()
+                    || self.children[i].starts_with_whitespace())
+            {
+                space_w
+            } else {
+                0.0
+            };
+
+            let mut child_cb = Dimensions::new(Rect::new(
+                start_x + cursor_x + gap_before,
+                start_y + cursor_y,
+                available_width,
+                0.0,
+            ));
+            self.children[i].layout_child_in_inline_flow(child_cb);
+
+            let child_w = self.children[i].dimensions.margin_box().width;
+            if cursor_x > 0.0
+                && available_width.is_finite()
+                && available_width > 0.0
+                && cursor_x + gap_before + child_w > available_width
+            {
+                lines_ranges.push((line_start, i, cursor_x));
+                max_w = max_w.max(cursor_x);
+                cursor_y += line_h;
+                cursor_x = 0.0;
+                line_h = 0.0;
+                line_start = i;
+
+                child_cb = Dimensions::new(Rect::new(
+                    start_x,
+                    start_y + cursor_y,
+                    available_width,
+                    0.0,
+                ));
+                self.children[i].layout_child_in_inline_flow(child_cb);
+            }
+
+            let cw = self.children[i].dimensions.margin_box().width;
+            let ch = self.children[i].dimensions.margin_box().height;
+            cursor_x = if i == line_start {
+                cw
+            } else {
+                cursor_x + gap_before + cw
+            };
+            line_h = line_h.max(ch);
+        }
+
+        if !self.children.is_empty() {
+            lines_ranges.push((line_start, self.children.len(), cursor_x));
+            max_w = max_w.max(cursor_x);
+        }
+        let total_h = cursor_y + line_h;
+
+        let text_align = self
+            .style
+            .as_ref()
+            .map_or(lilies_css::TextAlign::Left, |s| s.text_align);
+        let target_align_w = if align_lines && available_width.is_finite() {
+            available_width
+        } else {
+            max_w
+        };
+
+        if text_align != lilies_css::TextAlign::Left && target_align_w.is_finite() {
+            for (s_idx, e_idx, line_w) in lines_ranges {
+                let space = (target_align_w - line_w).max(0.0);
+                let shift_x = match text_align {
+                    lilies_css::TextAlign::Center => space / 2.0,
+                    lilies_css::TextAlign::Right => space,
+                    lilies_css::TextAlign::Left => 0.0,
+                };
+                if shift_x > 0.0 {
+                    for child in &mut self.children[s_idx..e_idx] {
+                        child.offset_by(shift_x, 0.0);
+                    }
+                }
+            }
+        }
+
+        (max_w, total_h)
     }
 
     /// Sets explicit height if specified, or retains the accumulated children's height if auto.
@@ -408,11 +558,20 @@ impl LayoutBox {
 
     /// Basic layout for an inline-level box.
     pub fn layout_inline(&mut self, containing_block: Dimensions) {
+        self.layout_inline_in_flow(containing_block, true);
+    }
+
+    fn layout_inline_in_flow(&mut self, containing_block: Dimensions, align_self_in_cb: bool) {
         if let Some(ref style) = self.style {
             self.dimensions.padding.top = style.padding_top;
             self.dimensions.padding.bottom = style.padding_bottom;
             self.dimensions.padding.left = style.padding_left;
             self.dimensions.padding.right = style.padding_right;
+
+            self.dimensions.border.top = style.border_top;
+            self.dimensions.border.bottom = style.border_bottom;
+            self.dimensions.border.left = style.border_left;
+            self.dimensions.border.right = style.border_right;
 
             self.dimensions.margin.top = match style.margin_top {
                 LengthOrAuto::Px(v) => v,
@@ -431,12 +590,8 @@ impl LayoutBox {
                 LengthOrAuto::Auto => 0.0,
             };
 
-            if let Some(w) = style.width.to_px() {
-                self.dimensions.content.width = w;
-            }
-            if let Some(h) = style.height.to_px() {
-                self.dimensions.content.height = h;
-            }
+            self.dimensions.content.width = style.width.to_px().unwrap_or(0.0);
+            self.dimensions.content.height = style.height.to_px().unwrap_or(0.0);
         }
 
         self.dimensions.content.x = containing_block.content.x
@@ -450,13 +605,22 @@ impl LayoutBox {
             + self.dimensions.border.top
             + self.dimensions.padding.top;
 
+        let non_content_w = self.dimensions.margin.left
+            + self.dimensions.border.left
+            + self.dimensions.padding.left
+            + self.dimensions.padding.right
+            + self.dimensions.border.right
+            + self.dimensions.margin.right;
+        let available_width = if self.dimensions.content.width > 0.0 {
+            self.dimensions.content.width
+        } else if containing_block.content.width.is_finite() && containing_block.content.width > 0.0 {
+            (containing_block.content.width - non_content_w).max(0.0)
+        } else {
+            f32::INFINITY
+        };
+
         if let Some(ref text) = self.text {
             let font_size = self.style.as_ref().map_or(16.0, |s| s.font_size);
-            let available_width = if self.dimensions.content.width > 0.0 {
-                self.dimensions.content.width
-            } else {
-                containing_block.content.width
-            };
             self.lines = crate::font::wrap_text(
                 text,
                 font_size,
@@ -469,10 +633,19 @@ impl LayoutBox {
                     .style
                     .as_ref()
                     .map_or(lilies_css::TextAlign::Left, |s| s.text_align);
-                let containing_block_width = available_width;
-                if text_align != lilies_css::TextAlign::Left && containing_block_width.is_finite() {
+                let max_line_w = self
+                    .lines
+                    .iter()
+                    .map(|l| l.rect.width)
+                    .fold(0.0f32, f32::max);
+                let align_w = if align_self_in_cb && available_width.is_finite() {
+                    available_width
+                } else {
+                    max_line_w
+                };
+                if text_align != lilies_css::TextAlign::Left && align_w.is_finite() {
                     for line in &mut self.lines {
-                        let space = containing_block_width - line.rect.width;
+                        let space = (align_w - line.rect.width).max(0.0);
                         match text_align {
                             lilies_css::TextAlign::Center => {
                                 line.rect.x += space / 2.0;
@@ -504,17 +677,8 @@ impl LayoutBox {
         }
 
         if !self.children.is_empty() {
-            let mut total_h = 0.0f32;
-            let mut max_w = 0.0f32;
-            let mut child_cb = self.dimensions;
-            if child_cb.content.width == 0.0 {
-                child_cb.content.width = f32::INFINITY;
-            }
-            for child in &mut self.children {
-                child.layout(child_cb);
-                total_h += child.dimensions.margin_box().height;
-                max_w = max_w.max(child.dimensions.margin_box().width);
-            }
+            let explicit_w = self.dimensions.content.width > 0.0;
+            let (max_w, total_h) = self.layout_inline_children_flow(available_width, explicit_w);
             if self.dimensions.content.height == 0.0 {
                 self.dimensions.content.height = total_h;
             }
@@ -522,21 +686,23 @@ impl LayoutBox {
                 self.dimensions.content.width = max_w;
             }
 
-            // Align this inline container within containing_block if text-align is specified
-            let text_align = self
-                .style
-                .as_ref()
-                .map_or(lilies_css::TextAlign::Left, |s| s.text_align);
-            let total_w = self.dimensions.margin_box().width;
-            let space = containing_block.content.width - total_w;
-            if space > 0.0 && containing_block.content.width.is_finite() {
-                let shift_x = match text_align {
-                    lilies_css::TextAlign::Center => space / 2.0,
-                    lilies_css::TextAlign::Right => space,
-                    lilies_css::TextAlign::Left => 0.0,
-                };
-                if shift_x > 0.0 {
-                    self.offset_by(shift_x, 0.0);
+            if align_self_in_cb {
+                // Align this inline container within containing_block if text-align is specified
+                let text_align = self
+                    .style
+                    .as_ref()
+                    .map_or(lilies_css::TextAlign::Left, |s| s.text_align);
+                let total_w = self.dimensions.margin_box().width;
+                let space = containing_block.content.width - total_w;
+                if space > 0.0 && containing_block.content.width.is_finite() {
+                    let shift_x = match text_align {
+                        lilies_css::TextAlign::Center => space / 2.0,
+                        lilies_css::TextAlign::Right => space,
+                        lilies_css::TextAlign::Left => 0.0,
+                    };
+                    if shift_x > 0.0 {
+                        self.offset_by(shift_x, 0.0);
+                    }
                 }
             }
         }
@@ -545,6 +711,10 @@ impl LayoutBox {
     /// Lays out a replaced image box according to intrinsic dimensions, aspect ratio,
     /// and explicit CSS or HTML width/height constraints.
     pub fn layout_image(&mut self, containing_block: Dimensions) {
+        self.layout_image_in_flow(containing_block, true);
+    }
+
+    fn layout_image_in_flow(&mut self, containing_block: Dimensions, align_self_in_cb: bool) {
         let image = match &self.box_type {
             BoxType::ImageNode(_, img) => Arc::clone(img),
             _ => return,
@@ -559,6 +729,11 @@ impl LayoutBox {
                 self.dimensions.padding.bottom = style.padding_bottom;
                 self.dimensions.padding.left = style.padding_left;
                 self.dimensions.padding.right = style.padding_right;
+
+                self.dimensions.border.top = style.border_top;
+                self.dimensions.border.bottom = style.border_bottom;
+                self.dimensions.border.left = style.border_left;
+                self.dimensions.border.right = style.border_right;
 
                 self.dimensions.margin.top = match style.margin_top {
                     LengthOrAuto::Px(v) => v,
@@ -670,20 +845,22 @@ impl LayoutBox {
                 self.dimensions.margin.left = ml_px;
                 self.dimensions.margin.right = mr_px;
 
-                let text_align = self
-                    .style
-                    .as_ref()
-                    .map_or(lilies_css::TextAlign::Left, |s| s.text_align);
-                let space = cb_width - (total_non_margin + ml_px + mr_px);
-                if space > 0.0 {
-                    match text_align {
-                        lilies_css::TextAlign::Center => {
-                            self.dimensions.margin.left += space / 2.0;
+                if align_self_in_cb {
+                    let text_align = self
+                        .style
+                        .as_ref()
+                        .map_or(lilies_css::TextAlign::Left, |s| s.text_align);
+                    let space = cb_width - (total_non_margin + ml_px + mr_px);
+                    if space > 0.0 && cb_width.is_finite() {
+                        match text_align {
+                            lilies_css::TextAlign::Center => {
+                                self.dimensions.margin.left += space / 2.0;
+                            }
+                            lilies_css::TextAlign::Right => {
+                                self.dimensions.margin.left += space;
+                            }
+                            lilies_css::TextAlign::Left => {}
                         }
-                        lilies_css::TextAlign::Right => {
-                            self.dimensions.margin.left += space;
-                        }
-                        lilies_css::TextAlign::Left => {}
                     }
                 }
             }
@@ -755,14 +932,13 @@ impl LayoutBox {
                         }
                     }
                 } else if !self.children.is_empty() {
-                    let mut total_h = 0.0f32;
-                    let mut max_w = 0.0f32;
-                    let child_cb = self.dimensions;
-                    for c in &mut self.children {
-                        c.layout(child_cb);
-                        total_h += c.dimensions.margin_box().height;
-                        max_w = max_w.max(c.dimensions.margin_box().width);
-                    }
+                    let available_width = if self.dimensions.content.width > 0.0 {
+                        self.dimensions.content.width
+                    } else {
+                        f32::INFINITY
+                    };
+                    let (max_w, total_h) =
+                        self.layout_inline_children_flow(available_width, false);
                     if self.dimensions.content.height == 0.0 {
                         self.dimensions.content.height = total_h;
                     }
@@ -798,6 +974,11 @@ impl LayoutBox {
                 self.dimensions.padding.bottom = style.padding_bottom;
                 self.dimensions.padding.left = style.padding_left;
                 self.dimensions.padding.right = style.padding_right;
+
+                self.dimensions.border.top = style.border_top;
+                self.dimensions.border.bottom = style.border_bottom;
+                self.dimensions.border.left = style.border_left;
+                self.dimensions.border.right = style.border_right;
 
                 self.dimensions.margin.top = match style.margin_top {
                     LengthOrAuto::Px(v) => v,
@@ -841,6 +1022,11 @@ impl LayoutBox {
                 child.dimensions.padding.bottom = style.padding_bottom;
                 child.dimensions.padding.left = style.padding_left;
                 child.dimensions.padding.right = style.padding_right;
+
+                child.dimensions.border.top = style.border_top;
+                child.dimensions.border.bottom = style.border_bottom;
+                child.dimensions.border.left = style.border_left;
+                child.dimensions.border.right = style.border_right;
 
                 child.dimensions.margin.top = match style.margin_top {
                     LengthOrAuto::Px(v) => v,
@@ -1021,6 +1207,11 @@ impl LayoutBox {
                 self.dimensions.padding.left = style.padding_left;
                 self.dimensions.padding.right = style.padding_right;
 
+                self.dimensions.border.top = style.border_top;
+                self.dimensions.border.bottom = style.border_bottom;
+                self.dimensions.border.left = style.border_left;
+                self.dimensions.border.right = style.border_right;
+
                 self.dimensions.margin.top = match style.margin_top {
                     LengthOrAuto::Px(v) => v,
                     LengthOrAuto::Auto => 0.0,
@@ -1063,6 +1254,11 @@ impl LayoutBox {
                 child.dimensions.padding.bottom = style.padding_bottom;
                 child.dimensions.padding.left = style.padding_left;
                 child.dimensions.padding.right = style.padding_right;
+
+                child.dimensions.border.top = style.border_top;
+                child.dimensions.border.bottom = style.border_bottom;
+                child.dimensions.border.left = style.border_left;
+                child.dimensions.border.right = style.border_right;
 
                 child.dimensions.margin.top = match style.margin_top {
                     LengthOrAuto::Px(v) => v,
@@ -1307,8 +1503,8 @@ pub fn measure_box_outer_width(layout_box: &LayoutBox) -> f32 {
             style.padding_right,
             ml,
             mr,
-            layout_box.dimensions.border.left,
-            layout_box.dimensions.border.right,
+            style.border_left.max(layout_box.dimensions.border.left),
+            style.border_right.max(layout_box.dimensions.border.right),
         )
     } else {
         (
@@ -1402,8 +1598,8 @@ pub fn measure_box_outer_height(layout_box: &LayoutBox) -> f32 {
             style.padding_bottom,
             mt,
             mb,
-            layout_box.dimensions.border.top,
-            layout_box.dimensions.border.bottom,
+            style.border_top.max(layout_box.dimensions.border.top),
+            style.border_bottom.max(layout_box.dimensions.border.bottom),
         )
     } else {
         (

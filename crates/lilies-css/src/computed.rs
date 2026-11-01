@@ -91,6 +91,11 @@ pub struct ComputedStyle {
     pub padding_right: f32,
     pub padding_bottom: f32,
     pub padding_left: f32,
+    pub border_top: f32,
+    pub border_right: f32,
+    pub border_bottom: f32,
+    pub border_left: f32,
+    pub border_color: Option<Color>,
     pub background_color: Color,
     pub color: Color,
     pub font_size: f32,
@@ -117,6 +122,11 @@ impl Default for ComputedStyle {
             padding_right: 0.0,
             padding_bottom: 0.0,
             padding_left: 0.0,
+            border_top: 0.0,
+            border_right: 0.0,
+            border_bottom: 0.0,
+            border_left: 0.0,
+            border_color: None,
             background_color: Color::TRANSPARENT,
             color: Color::BLACK,
             font_size: 16.0,
@@ -312,6 +322,92 @@ impl ComputedStyle {
                 self.apply_padding_shorthand(val, root_font_size);
             }
 
+            "border-top-width" => {
+                if let Some(b) = resolve_border_width(val, self.font_size, root_font_size) {
+                    self.border_top = b;
+                }
+            }
+            "border-right-width" => {
+                if let Some(b) = resolve_border_width(val, self.font_size, root_font_size) {
+                    self.border_right = b;
+                }
+            }
+            "border-bottom-width" => {
+                if let Some(b) = resolve_border_width(val, self.font_size, root_font_size) {
+                    self.border_bottom = b;
+                }
+            }
+            "border-left-width" => {
+                if let Some(b) = resolve_border_width(val, self.font_size, root_font_size) {
+                    self.border_left = b;
+                }
+            }
+            "border-width" => {
+                self.apply_border_width_shorthand(val, root_font_size);
+            }
+            "border-color" => {
+                let first = match val {
+                    Value::List(items) => items.first().unwrap_or(val),
+                    single => single,
+                };
+                if let Some(c) = first.to_color() {
+                    self.border_color = Some(c);
+                }
+            }
+            "border-style" => {
+                if let Some(k) = val.as_keyword() {
+                    if k.eq_ignore_ascii_case("none") || k.eq_ignore_ascii_case("hidden") {
+                        self.border_top = 0.0;
+                        self.border_right = 0.0;
+                        self.border_bottom = 0.0;
+                        self.border_left = 0.0;
+                    }
+                }
+            }
+            "border" => {
+                if let Some((w, c)) = parse_border_side_shorthand(val, self.font_size, root_font_size) {
+                    self.border_top = w;
+                    self.border_right = w;
+                    self.border_bottom = w;
+                    self.border_left = w;
+                    if let Some(color) = c {
+                        self.border_color = Some(color);
+                    }
+                }
+            }
+            "border-top" => {
+                if let Some((w, c)) = parse_border_side_shorthand(val, self.font_size, root_font_size) {
+                    self.border_top = w;
+                    if let Some(color) = c {
+                        self.border_color = Some(color);
+                    }
+                }
+            }
+            "border-right" => {
+                if let Some((w, c)) = parse_border_side_shorthand(val, self.font_size, root_font_size) {
+                    self.border_right = w;
+                    if let Some(color) = c {
+                        self.border_color = Some(color);
+                    }
+                }
+            }
+            "border-bottom" => {
+                if let Some((w, c)) = parse_border_side_shorthand(val, self.font_size, root_font_size) {
+                    self.border_bottom = w;
+                    if let Some(color) = c {
+                        self.border_color = Some(color);
+                    }
+                }
+            }
+            "border-left" => {
+                if let Some((w, c)) = parse_border_side_shorthand(val, self.font_size, root_font_size) {
+                    self.border_left = w;
+                    if let Some(color) = c {
+                        self.border_color = Some(color);
+                    }
+                }
+            }
+
             "flex-direction" => {
                 if let Some(k) = val.as_keyword() {
                     match k.to_ascii_lowercase().as_str() {
@@ -465,6 +561,121 @@ impl ComputedStyle {
             }
         }
     }
+
+    fn apply_border_width_shorthand(&mut self, val: &Value, root_font_size: f32) {
+        let f_size = self.font_size;
+        match val {
+            Value::List(items) => {
+                let parsed: Vec<Option<f32>> = items
+                    .iter()
+                    .map(|v| resolve_border_width(v, f_size, root_font_size))
+                    .collect();
+                match parsed.as_slice() {
+                    [Some(top_bottom), Some(right_left)] => {
+                        self.border_top = *top_bottom;
+                        self.border_bottom = *top_bottom;
+                        self.border_right = *right_left;
+                        self.border_left = *right_left;
+                    }
+                    [Some(top), Some(right_left), Some(bottom)] => {
+                        self.border_top = *top;
+                        self.border_right = *right_left;
+                        self.border_left = *right_left;
+                        self.border_bottom = *bottom;
+                    }
+                    [Some(top), Some(right), Some(bottom), Some(left)] => {
+                        self.border_top = *top;
+                        self.border_right = *right;
+                        self.border_bottom = *bottom;
+                        self.border_left = *left;
+                    }
+                    _ => {}
+                }
+            }
+            single => {
+                if let Some(b) = resolve_border_width(single, f_size, root_font_size) {
+                    self.border_top = b;
+                    self.border_right = b;
+                    self.border_bottom = b;
+                    self.border_left = b;
+                }
+            }
+        }
+    }
+}
+
+fn resolve_border_width(val: &Value, font_size: f32, root_font_size: f32) -> Option<f32> {
+    if let Some(l) = resolve_length(val, font_size, root_font_size) {
+        return Some(l.max(0.0));
+    }
+    if let Some(k) = val.as_keyword() {
+        match k.to_ascii_lowercase().as_str() {
+            "thin" => return Some(1.0),
+            "medium" => return Some(3.0),
+            "thick" => return Some(5.0),
+            "none" | "hidden" => return Some(0.0),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn parse_border_side_shorthand(
+    val: &Value,
+    font_size: f32,
+    root_font_size: f32,
+) -> Option<(f32, Option<Color>)> {
+    let items: &[Value] = match val {
+        Value::List(list) => list.as_slice(),
+        single => std::slice::from_ref(single),
+    };
+
+    let mut width: Option<f32> = None;
+    let mut color: Option<Color> = None;
+    let mut is_none = false;
+    let mut has_style = false;
+
+    for item in items {
+        if let Some(k) = item.as_keyword() {
+            match k.to_ascii_lowercase().as_str() {
+                "none" | "hidden" => {
+                    is_none = true;
+                    has_style = true;
+                    continue;
+                }
+                "solid" | "dashed" | "dotted" | "double" | "groove" | "ridge" | "inset"
+                | "outset" => {
+                    has_style = true;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        if width.is_none() {
+            if let Some(w) = resolve_border_width(item, font_size, root_font_size) {
+                width = Some(w);
+                continue;
+            }
+        }
+        if color.is_none() {
+            if let Some(c) = item.to_color() {
+                color = Some(c);
+                continue;
+            }
+        }
+    }
+
+    if is_none {
+        return Some((0.0, color));
+    }
+    if let Some(w) = width {
+        return Some((w, color));
+    }
+    if has_style {
+        // Default border-width is 'medium' (3px) when border-style is specified without width
+        return Some((3.0, color));
+    }
+    None
 }
 
 /// Resolves a CSS length or `auto` keyword into `LengthOrAuto` using element font-size and root font-size.
@@ -700,13 +911,26 @@ fn compute_node(
             .unwrap_or_default();
 
         // Pass 1: Apply font-size / font declarations first so element's font_size is established
-        for (_, _, decl) in &matched {
+        // Order: normal stylesheet -> normal inline -> !important stylesheet -> !important inline
+        for (_, _, decl) in matched.iter().filter(|(_, _, d)| !d.important) {
             let name = decl.name.to_ascii_lowercase();
             if name == "font-size" || name == "font" {
                 style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
             }
         }
-        for decl in &inline_decls {
+        for decl in inline_decls.iter().filter(|d| !d.important) {
+            let name = decl.name.to_ascii_lowercase();
+            if name == "font-size" || name == "font" {
+                style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
+            }
+        }
+        for (_, _, decl) in matched.iter().filter(|(_, _, d)| d.important) {
+            let name = decl.name.to_ascii_lowercase();
+            if name == "font-size" || name == "font" {
+                style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
+            }
+        }
+        for decl in inline_decls.iter().filter(|d| d.important) {
             let name = decl.name.to_ascii_lowercase();
             if name == "font-size" || name == "font" {
                 style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
@@ -714,13 +938,25 @@ fn compute_node(
         }
 
         // Pass 2: Apply all remaining declarations in cascading order
-        for (_, _, decl) in &matched {
+        for (_, _, decl) in matched.iter().filter(|(_, _, d)| !d.important) {
             let name = decl.name.to_ascii_lowercase();
             if name != "font-size" && name != "font" {
                 style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
             }
         }
-        for decl in &inline_decls {
+        for decl in inline_decls.iter().filter(|d| !d.important) {
+            let name = decl.name.to_ascii_lowercase();
+            if name != "font-size" && name != "font" {
+                style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
+            }
+        }
+        for (_, _, decl) in matched.iter().filter(|(_, _, d)| d.important) {
+            let name = decl.name.to_ascii_lowercase();
+            if name != "font-size" && name != "font" {
+                style.apply_declaration_with_context(decl, parent_font_size, root_font_size);
+            }
+        }
+        for decl in inline_decls.iter().filter(|d| d.important) {
             let name = decl.name.to_ascii_lowercase();
             if name != "font-size" && name != "font" {
                 style.apply_declaration_with_context(decl, parent_font_size, root_font_size);

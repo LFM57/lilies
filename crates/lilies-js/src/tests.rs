@@ -338,4 +338,175 @@ fn test_helpers_camel_to_kebab_and_style_helpers() {
     assert_eq!(get_inline_style_prop(Some(&updated), "color"), Some("red".to_string()));
     assert_eq!(get_inline_style_prop(Some(&updated), "padding"), Some("10px".to_string()));
     assert_eq!(get_inline_style_prop(Some(&updated), "margin"), None);
+
+    // Clearing a property removes it without leaving `color: ;`
+    let cleared = update_inline_style(Some(&updated), "color", "");
+    assert!(!cleared.contains("color"));
+    assert_eq!(get_inline_style_prop(Some(&cleared), "color"), None);
+    assert_eq!(get_inline_style_prop(Some(&cleared), "padding"), Some("10px".to_string()));
+}
+
+#[test]
+fn test_clear_inline_style_and_css_text() {
+    let html = r#"<html><body><div id="box" style="width: 100px; color: red;"></div></body></html>"#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    runtime
+        .eval(
+            r#"
+        var box = document.getElementById("box");
+        box.style.color = "";
+    "#,
+        )
+        .expect("eval failed");
+
+    let box_id = runtime.find_element_by_id("box").unwrap();
+    let style_after_clear = runtime
+        .doc()
+        .node(box_id)
+        .and_then(|n| n.as_element())
+        .and_then(|el| el.get_attribute("style"))
+        .unwrap()
+        .to_string();
+    assert_eq!(style_after_clear, "width: 100px;");
+
+    let color_val = runtime.eval("box.style.color").unwrap();
+    assert_eq!(color_val.as_string().map(|s| s.to_std_string_escaped()), Some(String::new()));
+
+    runtime
+        .eval(r#"box.style.cssText = "height: 50px; color: green;";"#)
+        .expect("eval cssText failed");
+    let css_text_val = runtime.eval("box.style.cssText").unwrap();
+    assert_eq!(
+        css_text_val.as_string().map(|s| s.to_std_string_escaped()),
+        Some("height: 50px; color: green;".to_string())
+    );
+    let height_val = runtime.eval("box.style.height").unwrap();
+    assert_eq!(
+        height_val.as_string().map(|s| s.to_std_string_escaped()),
+        Some("50px".to_string())
+    );
+}
+
+#[test]
+fn test_get_element_by_id_ignores_detached_nodes() {
+    let html = r#"<html><body><div id="container"><span id="item">Old</span></div></body></html>"#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        var container = document.getElementById("container");
+        var oldItem = document.getElementById("item");
+        container.removeChild(oldItem);
+        var afterRemove = document.getElementById("item");
+
+        var detached = document.createElement("span");
+        detached.id = "item";
+        detached.textContent = "Detached";
+        var beforeAppend = document.getElementById("item");
+
+        container.appendChild(detached);
+        var afterAppend = document.getElementById("item");
+
+        [afterRemove === null, beforeAppend === null, afterAppend.textContent].join(",");
+    "#,
+        )
+        .expect("eval failed");
+
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("true,true,Detached".to_string())
+    );
+}
+
+#[test]
+fn test_click_on_text_node_binds_this_to_listener_element_and_passes_event() {
+    let html = r#"<html><body><div id="outer"><button id="btn">Click Me!</button></div></body></html>"#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    runtime
+        .eval(
+            r#"
+        var btn = document.getElementById("btn");
+        var outer = document.getElementById("outer");
+        var outerClicked = false;
+        btn.addEventListener("click", function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            this.style.backgroundColor = "red";
+            this.textContent = "Clicked: " + e.target.id + ":" + e.currentTarget.id;
+        });
+        outer.addEventListener("click", function(e) {
+            outerClicked = true;
+        });
+    "#,
+        )
+        .expect("eval failed");
+
+    let btn_id = runtime.find_element_by_id("btn").unwrap();
+    let text_node_id = runtime.doc().first_child(btn_id).unwrap();
+    assert!(runtime.doc().node(text_node_id).unwrap().is_text());
+
+    // Dispatch click on the inner Text node (just as hit_test returns when clicking button text)
+    runtime
+        .dispatch_click(text_node_id)
+        .expect("dispatch_click on text node failed");
+
+    assert_eq!(runtime.doc().text_content(btn_id), "Clicked: btn:btn");
+    let bg = runtime.eval("btn.style.backgroundColor").unwrap();
+    assert_eq!(
+        bg.as_string().map(|s| s.to_std_string_escaped()),
+        Some("red".to_string())
+    );
+    let outer_clicked = runtime.eval("outerClicked").unwrap();
+    assert_eq!(outer_clicked.as_boolean(), Some(false));
+
+    // Also verify mutating textContent directly on a Text node updates Text::data in place
+    runtime
+        .eval(r#"btn.firstChild.textContent = "Direct Text Node Update";"#)
+        .expect("mutating firstChild.textContent failed");
+    assert_eq!(
+        runtime.doc().text_content(btn_id),
+        "Direct Text Node Update"
+    );
+    let fc_id = runtime.doc().first_child(btn_id).unwrap();
+    assert_eq!(runtime.doc().get_children(fc_id).len(), 0);
+}
+
+#[test]
+fn test_append_child_and_insert_before_cycle_preserves_parent() {
+    let html = r#"<html><body><div id="parent"><span id="child">Text</span></div></body></html>"#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        var parent = document.getElementById("parent");
+        var child = document.getElementById("child");
+        var caughtAppend = false;
+        try {
+            child.appendChild(parent);
+        } catch (e) {
+            caughtAppend = true;
+        }
+        var caughtInsert = false;
+        try {
+            child.insertBefore(parent, null);
+        } catch (e) {
+            caughtInsert = true;
+        }
+        [caughtAppend, caughtInsert, document.getElementById("parent") !== null, parent.parentNode.tagName].join(",");
+    "#,
+        )
+        .expect("eval failed");
+
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("true,true,true,BODY".to_string())
+    );
 }

@@ -2,7 +2,7 @@
 
 use lilies_css::StyleTree;
 use lilies_dom::{Document, NodeId};
-use lilies_html::{load_styles_with_external, parse_html};
+use lilies_html::parse_html;
 use lilies_js::JsRuntime;
 use lilies_layout::{
     build_layout_tree_with_cache, find_parent_link, hit_test, layout, Dimensions, EdgeSizes,
@@ -450,10 +450,28 @@ pub fn load_images_for_document(doc: &Document, base_url: &str, cache: &ImageCac
                 cache.insert(src, img);
             }
             Err(e) => {
+                if src != resolved {
+                    cache.remove(&src);
+                }
                 eprintln!("Failed to fetch or decode image '{}': {}", resolved, e);
             }
         }
     }
+}
+
+fn load_styles_with_cache(
+    doc: &Document,
+    base_url: &str,
+    stylesheet_cache: &mut std::collections::HashMap<String, String>,
+) -> StyleTree {
+    lilies_html::load_styles_with_fetcher(doc, base_url, |url| -> Result<String, String> {
+        if let Some(cached) = stylesheet_cache.get(url) {
+            return Ok(cached.clone());
+        }
+        let css = lilies_net::fetch(url).map_err(|e| e.to_string())?;
+        stylesheet_cache.insert(url.to_string(), css.clone());
+        Ok(css)
+    })
 }
 
 /// Source of JavaScript execution in an HTML document.
@@ -559,22 +577,25 @@ pub struct ShellState {
     pub cached_window: Option<Pixmap>,
 
     pub js_runtime: JsRuntime,
+    pub stylesheet_cache: std::collections::HashMap<String, String>,
 }
 
 impl ShellState {
     pub fn new(initial_target: String) -> Self {
         let (html_content, current_url) = fetch_or_fallback(&initial_target);
         let doc = parse_html(&html_content);
-        let mut styles = load_styles_with_external(&doc, &current_url);
+        let mut stylesheet_cache = std::collections::HashMap::new();
+        let mut styles = load_styles_with_cache(&doc, &current_url, &mut stylesheet_cache);
         let image_cache = ImageCache::new();
-        load_images_for_document(&doc, &current_url, &image_cache);
 
         let mut js_runtime = JsRuntime::new(doc);
         run_scripts_for_document(&mut js_runtime, &current_url);
         if js_runtime.take_dirty() {
-            styles = load_styles_with_external(&js_runtime.doc(), &current_url);
+            styles =
+                load_styles_with_cache(&js_runtime.doc(), &current_url, &mut stylesheet_cache);
         }
         let doc = js_runtime.doc().clone();
+        load_images_for_document(&doc, &current_url, &image_cache);
         let html_id = find_html_root(&doc).expect("Root <html> element required in document");
 
         Self {
@@ -596,6 +617,7 @@ impl ShellState {
             cached_page: None,
             cached_window: None,
             js_runtime,
+            stylesheet_cache,
         }
     }
 
@@ -603,15 +625,17 @@ impl ShellState {
         println!("Navigating to: {}", target_url);
         let (html_content, loaded_url) = fetch_or_fallback(target_url);
         let doc = parse_html(&html_content);
-        let mut styles = load_styles_with_external(&doc, &loaded_url);
-        load_images_for_document(&doc, &loaded_url, &self.image_cache);
+        let mut styles = load_styles_with_cache(&doc, &loaded_url, &mut self.stylesheet_cache);
 
         let mut js_runtime = JsRuntime::new(doc);
         run_scripts_for_document(&mut js_runtime, &loaded_url);
         if js_runtime.take_dirty() {
-            styles = load_styles_with_external(&js_runtime.doc(), &loaded_url);
+            styles =
+                load_styles_with_cache(&js_runtime.doc(), &loaded_url, &mut self.stylesheet_cache);
         }
         let doc = js_runtime.doc().clone();
+        self.image_cache.clear();
+        load_images_for_document(&doc, &loaded_url, &self.image_cache);
         let Some(html_id) = find_html_root(&doc) else {
             eprintln!("Document missing <html> root element");
             return;
@@ -633,6 +657,23 @@ impl ShellState {
             self.history.truncate(self.history_index + 1);
             self.history.push(self.current_url.clone());
             self.history_index = self.history.len() - 1;
+        }
+    }
+
+    pub fn handle_click_on_node(&mut self, hit_id: NodeId) -> bool {
+        if let Err(e) = self.js_runtime.dispatch_click(hit_id) {
+            eprintln!("JS error on click: {}", e);
+        }
+        if self.js_runtime.take_dirty() {
+            self.doc = self.js_runtime.doc().clone();
+            load_images_for_document(&self.doc, &self.current_url, &self.image_cache);
+            self.styles =
+                load_styles_with_cache(&self.doc, &self.current_url, &mut self.stylesheet_cache);
+            self.cached_page = None;
+            self.cached_window = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -1011,17 +1052,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state.navigate(&resolved, true);
                             window.request_redraw();
                         } else if let Some(hit_id) = hit {
-                            if let Err(e) = state.js_runtime.dispatch_click(hit_id) {
-                                eprintln!("JS error on click: {}", e);
-                            }
-                            if state.js_runtime.take_dirty() {
-                                state.doc = state.js_runtime.doc().clone();
-                                state.styles =
-                                    load_styles_with_external(&state.doc, &state.current_url);
-                                state.cached_page = None;
-                                state.cached_window = None;
-                                window.request_redraw();
-                            } else if was_focused {
+                            if state.handle_click_on_node(hit_id) || was_focused {
                                 window.request_redraw();
                             }
                         } else if was_focused {
@@ -1147,6 +1178,7 @@ mod tests {
     use lilies_css::{
         compute_styles, compute_styles_for_document, parse_styles_from_document, StyleSheet,
     };
+    use lilies_html::load_styles_with_external;
     use lilies_layout::build_layout_tree;
 
     #[test]
@@ -2097,6 +2129,84 @@ mod tests {
         assert_eq!(state.doc.text_content(target_id), "Loaded from External");
 
         let _ = fs::remove_file(js_path);
+        let _ = fs::remove_file(html_path);
+        let _ = fs::remove_dir(temp_dir);
+    }
+
+    #[test]
+    fn test_js_mutated_images_and_cached_stylesheet_on_click() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("lilies_test_js_img_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+
+        let mut img = image::RgbaImage::new(2, 2);
+        for p in img.pixels_mut() {
+            *p = image::Rgba([0, 255, 0, 255]);
+        }
+        let img1_path = temp_dir.join("init.png");
+        let img2_path = temp_dir.join("click.png");
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+        let png_bytes = cursor.into_inner();
+        fs::write(&img1_path, &png_bytes).unwrap();
+        fs::write(&img2_path, &png_bytes).unwrap();
+
+        let css_path = temp_dir.join("style.css");
+        fs::write(&css_path, "body { background-color: #112233; }").unwrap();
+
+        let html_path = temp_dir.join("index.html");
+        let html_content = r#"<html>
+            <head><link rel="stylesheet" href="style.css"></head>
+            <body>
+                <img id="pic" />
+                <button id="btn">Swap</button>
+                <script>
+                    var pic = document.getElementById("pic");
+                    pic.setAttribute("src", "init.png");
+                    var btn = document.getElementById("btn");
+                    btn.addEventListener("click", function() {
+                        pic.setAttribute("src", "click.png");
+                    });
+                </script>
+            </body>
+        </html>"#;
+        fs::write(&html_path, html_content).unwrap();
+
+        let target_url = format!("file://{}", html_path.display());
+        let mut state = ShellState::new(target_url);
+
+        // 1. Image set by initial script should be loaded into image_cache
+        assert!(state.image_cache.get("init.png").is_some());
+
+        // Remove style.css from disk to prove click uses cached stylesheet instead of re-fetching
+        let _ = fs::remove_file(&css_path);
+
+        let btn_id = state.js_runtime.find_element_by_id("btn").unwrap();
+        assert!(state.handle_click_on_node(btn_id));
+
+        // 2. Image set by click listener should now be loaded into image_cache
+        assert!(state.image_cache.get("click.png").is_some());
+
+        // 3. Body background from cached style.css should still be preserved
+        let body_id = state
+            .doc
+            .get_children(state.html_id)
+            .into_iter()
+            .find(|&id| {
+                state
+                    .doc
+                    .node(id)
+                    .and_then(|n| n.as_element())
+                    .is_some_and(|el| el.tag_name() == "body")
+            })
+            .unwrap();
+        assert_eq!(
+            state.styles.get(body_id).unwrap().background_color,
+            Color::rgb(0x11, 0x22, 0x33)
+        );
+
+        let _ = fs::remove_file(img1_path);
+        let _ = fs::remove_file(img2_path);
         let _ = fs::remove_file(html_path);
         let _ = fs::remove_dir(temp_dir);
     }

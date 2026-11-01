@@ -76,6 +76,7 @@ impl Value {
 pub struct Declaration {
     pub name: String,
     pub value: Value,
+    pub important: bool,
 }
 
 impl Declaration {
@@ -83,16 +84,36 @@ impl Declaration {
         Self {
             name: name.into(),
             value,
+            important: false,
+        }
+    }
+
+    pub fn new_important(name: impl Into<String>, value: Value, important: bool) -> Self {
+        Self {
+            name: name.into(),
+            value,
+            important,
         }
     }
 }
 
-/// A CSS selector representing type, id, and class constraints on an element.
+/// Combinator connecting an ancestor selector to a descendant or child selector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Combinator {
+    /// Descendant combinator (whitespace, e.g. `div p`).
+    Descendant,
+    /// Child combinator (`>`, e.g. `div > p`).
+    Child,
+}
+
+/// A CSS selector representing type, id, class, pseudo-class, and ancestor constraints on an element.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Selector {
     pub tag_name: Option<String>,
     pub id: Option<String>,
     pub classes: Vec<String>,
+    pub pseudo_classes: Vec<String>,
+    pub parent: Option<(Combinator, Box<Selector>)>,
 }
 
 impl Selector {

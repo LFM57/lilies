@@ -80,6 +80,18 @@ impl ImageCache {
         }
     }
 
+    /// Removes a cached image entry by key.
+    pub fn remove(&self, url: &str) -> Option<Arc<DecodedImage>> {
+        self.entries.write().ok()?.remove(url)
+    }
+
+    /// Clears all entries from the cache.
+    pub fn clear(&self) {
+        if let Ok(mut map) = self.entries.write() {
+            map.clear();
+        }
+    }
+
     /// Checks if the cache contains an image for the given URL.
     pub fn contains(&self, url: &str) -> bool {
         self.entries

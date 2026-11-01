@@ -41,7 +41,7 @@ pub fn update_inline_style(existing: Option<&str>, prop: &str, val: &str) -> Str
             if let Some((k, v)) = part.split_once(':') {
                 let k = k.trim().to_ascii_lowercase();
                 let v = v.trim().to_string();
-                if !k.is_empty() {
+                if !k.is_empty() && !v.is_empty() {
                     entries.push((k, v));
                 }
             }
@@ -49,16 +49,21 @@ pub fn update_inline_style(existing: Option<&str>, prop: &str, val: &str) -> Str
     }
 
     let target_key = prop.to_ascii_lowercase();
-    let mut updated = false;
-    for (k, v) in &mut entries {
-        if k == &target_key {
-            *v = val.to_string();
-            updated = true;
-            break;
+    let val_trimmed = val.trim();
+    if val_trimmed.is_empty() {
+        entries.retain(|(k, _)| k != &target_key);
+    } else {
+        let mut updated = false;
+        for (k, v) in &mut entries {
+            if k == &target_key {
+                *v = val_trimmed.to_string();
+                updated = true;
+                break;
+            }
         }
-    }
-    if !updated {
-        entries.push((target_key, val.to_string()));
+        if !updated {
+            entries.push((target_key, val_trimmed.to_string()));
+        }
     }
 
     entries
@@ -83,56 +88,55 @@ pub fn get_inline_style_prop(existing: Option<&str>, prop: &str) -> Option<Strin
     None
 }
 
-/// Finds an element node in the DOM arena matching the given `id` attribute.
+fn find_in_tree<F>(doc: &Document, mut predicate: F) -> Option<NodeId>
+where
+    F: FnMut(&lilies_dom::Element) -> bool,
+{
+    let mut stack = vec![doc.root()];
+    while let Some(node_id) = stack.pop() {
+        if let Some(node) = doc.node(node_id) {
+            if let Some(el) = node.as_element() {
+                if predicate(el) {
+                    return Some(node_id);
+                }
+            }
+        }
+        for &child in doc.get_children(node_id).iter().rev() {
+            stack.push(child);
+        }
+    }
+    None
+}
+
+/// Finds an element node in the connected DOM tree matching the given `id` attribute.
 pub fn find_element_by_id(doc: &Document, id: &str) -> Option<NodeId> {
-    for node in doc.arena().iter() {
-        if let Some(el) = node.as_element() {
-            if el.id() == Some(id) {
-                return Some(node.id);
-            }
-        }
-    }
-    None
+    find_in_tree(doc, |el| el.id() == Some(id))
 }
 
-/// Finds the root `<html>` element in the document.
+/// Finds the root `<html>` element in the connected document tree.
 pub fn find_html_element(doc: &Document) -> Option<NodeId> {
-    for node in doc.arena().iter() {
-        if let Some(el) = node.as_element() {
-            if el.tag_name().eq_ignore_ascii_case("html") {
-                return Some(node.id);
-            }
-        }
-    }
-    None
+    find_in_tree(doc, |el| el.tag_name().eq_ignore_ascii_case("html"))
 }
 
-/// Finds the `<body>` element in the document.
+/// Finds the `<body>` element in the connected document tree.
 pub fn find_body_element(doc: &Document) -> Option<NodeId> {
-    for node in doc.arena().iter() {
-        if let Some(el) = node.as_element() {
-            if el.tag_name().eq_ignore_ascii_case("body") {
-                return Some(node.id);
-            }
-        }
-    }
-    None
+    find_in_tree(doc, |el| el.tag_name().eq_ignore_ascii_case("body"))
 }
 
-/// Finds the `<head>` element in the document.
+/// Finds the `<head>` element in the connected document tree.
 pub fn find_head_element(doc: &Document) -> Option<NodeId> {
-    for node in doc.arena().iter() {
-        if let Some(el) = node.as_element() {
-            if el.tag_name().eq_ignore_ascii_case("head") {
-                return Some(node.id);
-            }
-        }
-    }
-    None
+    find_in_tree(doc, |el| el.tag_name().eq_ignore_ascii_case("head"))
 }
 
-/// Replaces all child nodes of `node_id` with a single new Text node containing `text`.
+/// Replaces all child nodes of `node_id` with a single new Text node containing `text`,
+/// or directly mutates `Text::data` if `node_id` is already a `Text` node.
 pub fn set_node_text_content(doc: &mut Document, node_id: NodeId, text: &str) {
+    if let Some(node) = doc.node_mut(node_id) {
+        if let Some(text_node) = node.as_text_mut() {
+            text_node.data = text.to_string();
+            return;
+        }
+    }
     let children = doc.get_children(node_id);
     for child in children {
         let _ = doc.remove_child(node_id, child);
@@ -509,10 +513,10 @@ fn element_append_child(
     let child_val = args.get_or_undefined(0);
     let child_id = get_node_id_from_this(child_val)?;
     with_current_runtime(|inner| {
-        if let Some(p) = inner.doc.parent(child_id) {
-            let _ = inner.doc.remove_child(p, child_id);
-        }
-        let _ = inner.doc.append_child(parent_id, child_id);
+        inner
+            .doc
+            .append_child(parent_id, child_id)
+            .map_err(|e| JsNativeError::error().with_message(e.to_string()))?;
         inner.dirty = true;
         Ok(())
     })?;
@@ -528,7 +532,10 @@ fn element_remove_child(
     let child_val = args.get_or_undefined(0);
     let child_id = get_node_id_from_this(child_val)?;
     with_current_runtime(|inner| {
-        let _ = inner.doc.remove_child(parent_id, child_id);
+        inner
+            .doc
+            .remove_child(parent_id, child_id)
+            .map_err(|e| JsNativeError::error().with_message(e.to_string()))?;
         inner.dirty = true;
         Ok(())
     })?;
@@ -546,14 +553,17 @@ fn element_insert_before(
     let ref_child_val = args.get_or_undefined(1);
 
     with_current_runtime(|inner| {
-        if let Some(p) = inner.doc.parent(new_child_id) {
-            let _ = inner.doc.remove_child(p, new_child_id);
-        }
         if ref_child_val.is_null_or_undefined() {
-            let _ = inner.doc.append_child(parent_id, new_child_id);
+            inner
+                .doc
+                .append_child(parent_id, new_child_id)
+                .map_err(|e| JsNativeError::error().with_message(e.to_string()))?;
         } else {
             let ref_child_id = get_node_id_from_this(ref_child_val)?;
-            let _ = inner.doc.insert_before(parent_id, new_child_id, ref_child_id);
+            inner
+                .doc
+                .insert_before(parent_id, new_child_id, ref_child_id)
+                .map_err(|e| JsNativeError::error().with_message(e.to_string()))?;
         }
         inner.dirty = true;
         Ok(())
@@ -831,17 +841,99 @@ fn element_blur(_this: &JsValue, _args: &[JsValue], _context: &mut Context) -> J
 
 fn element_click(this: &JsValue, _args: &[JsValue], context: &mut Context) -> JsResult<JsValue> {
     let node_id = get_node_id_from_this(this)?;
-    let callbacks = with_current_runtime(|inner| {
-        let mut list = Vec::new();
-        if let Some(l) = inner.click_listeners.get(&node_id) {
-            list.extend(l.iter().cloned());
-        }
-        Ok(list)
-    })?;
-    for cb in callbacks {
-        let _ = cb.call(this, &[], context);
-    }
+    dispatch_click_with_context(node_id, context)?;
     Ok(JsValue::undefined())
+}
+
+fn dispatch_click_with_context(node_id: NodeId, context: &mut Context) -> JsResult<()> {
+    let target_id = with_current_runtime(|inner| {
+        let mut curr = Some(node_id);
+        let mut found = node_id;
+        while let Some(cid) = curr {
+            if inner.doc.node(cid).is_some_and(|n| n.is_element()) {
+                found = cid;
+                break;
+            }
+            curr = inner.doc.parent(cid);
+        }
+        Ok(found)
+    })?;
+
+    let mut ancestor_chain = Vec::new();
+    let mut current = Some(node_id);
+    while let Some(curr_id) = current {
+        let (listeners, cached_obj, parent_id) = with_current_runtime(|inner| {
+            let list = inner
+                .click_listeners
+                .get(&curr_id)
+                .cloned()
+                .unwrap_or_default();
+            let cached = inner.node_cache.get(&curr_id).cloned();
+            let parent = inner.doc.parent(curr_id);
+            Ok((list, cached, parent))
+        })?;
+
+        let mut cbs = listeners;
+        if let Some(cached_obj) = cached_obj {
+            if let Ok(onclick_val) = cached_obj.get(js_string!("onclick"), context) {
+                if let Some(cb_obj) = onclick_val.as_callable() {
+                    if let Some(cb) = JsFunction::from_object(cb_obj.clone()) {
+                        cbs.push(cb);
+                    }
+                }
+            }
+        }
+        if !cbs.is_empty() {
+            ancestor_chain.push((curr_id, cbs));
+        }
+        current = parent_id;
+    }
+
+    if ancestor_chain.is_empty() {
+        return Ok(());
+    }
+
+    let target_obj = get_or_create_element_object(target_id, context)?;
+    let create_event_fn = context
+        .global_object()
+        .get(js_string!("__createClickEvent"), context)?;
+
+    for (curr_id, cbs) in ancestor_chain {
+        let current_target_obj = get_or_create_element_object(curr_id, context)?;
+        let this_val = JsValue::new(current_target_obj.clone());
+
+        let event_val = if let Some(create_fn) = create_event_fn.as_callable() {
+            create_fn.call(
+                &JsValue::undefined(),
+                &[
+                    JsValue::new(target_obj.clone()),
+                    JsValue::new(current_target_obj),
+                ],
+                context,
+            )?
+        } else {
+            JsValue::undefined()
+        };
+
+        let mut stopped = false;
+        for cb in cbs {
+            cb.call(&this_val, std::slice::from_ref(&event_val), context)?;
+            if let Some(ev_obj) = event_val.as_object() {
+                if ev_obj
+                    .get(js_string!("_stopped"), context)
+                    .map(|v| v.to_boolean())
+                    .unwrap_or(false)
+                {
+                    stopped = true;
+                }
+            }
+        }
+        if stopped {
+            break;
+        }
+    }
+
+    Ok(())
 }
 
 fn element_get_bounding_client_rect(
@@ -871,6 +963,20 @@ fn internal_set_style(
     let node_id = NodeId(node_idx);
     let prop_raw = args.get_or_undefined(1).to_string(context)?.to_std_string_escaped();
     let val_str = args.get_or_undefined(2).to_string(context)?.to_std_string_escaped();
+
+    if prop_raw == "cssText" {
+        with_current_runtime(|inner| {
+            if let Some(node) = inner.doc.node_mut(node_id) {
+                if let Some(el) = node.as_element_mut() {
+                    el.set_attribute("style", val_str);
+                    inner.dirty = true;
+                }
+            }
+            Ok(())
+        })?;
+        return Ok(JsValue::undefined());
+    }
+
     let kebab_prop = camel_to_kebab(&prop_raw);
 
     with_current_runtime(|inner| {
@@ -896,6 +1002,23 @@ fn internal_get_style(
     let node_idx = args.get_or_undefined(0).to_u32(context)? as usize;
     let node_id = NodeId(node_idx);
     let prop_raw = args.get_or_undefined(1).to_string(context)?.to_std_string_escaped();
+
+    if prop_raw == "cssText" {
+        let val = with_current_runtime(|inner| {
+            let v = inner
+                .doc
+                .node(node_id)
+                .and_then(|n| n.as_element())
+                .and_then(|el| el.get_attribute("style"))
+                .map(String::from);
+            Ok(v)
+        })?;
+        return match val {
+            Some(v) => Ok(js_string!(v).into()),
+            None => Ok(js_string!("").into()),
+        };
+    }
+
     let kebab_prop = camel_to_kebab(&prop_raw);
 
     let val = with_current_runtime(|inner| {
@@ -1181,13 +1304,19 @@ impl JsRuntime {
         // Bind named forms to document (e.g. document.f)
         let named_forms = with_current_runtime(|inner| {
             let mut list = Vec::new();
-            for node in inner.doc.arena().iter() {
-                if let Some(el) = node.as_element() {
-                    if el.tag_name().eq_ignore_ascii_case("form") {
-                        if let Some(name) = el.get_attribute("name") {
-                            list.push((node.id, name.to_string()));
+            let mut stack = vec![inner.doc.root()];
+            while let Some(node_id) = stack.pop() {
+                if let Some(node) = inner.doc.node(node_id) {
+                    if let Some(el) = node.as_element() {
+                        if el.tag_name().eq_ignore_ascii_case("form") {
+                            if let Some(name) = el.get_attribute("name") {
+                                list.push((node_id, name.to_string()));
+                            }
                         }
                     }
+                }
+                for &child in inner.doc.get_children(node_id).iter().rev() {
+                    stack.push(child);
                 }
             }
             Ok(list)
@@ -1316,6 +1445,20 @@ impl JsRuntime {
             document.createElement = function(tag) { return __create_element(tag); };
             document.createTextNode = function(text) { return __create_text_node(text); };
             document.getElementsByTagName = function(tag) { return __get_elements_by_tag_name(tag); };
+
+            globalThis.__createClickEvent = function(target, currentTarget) {
+                return {
+                    type: "click",
+                    target: target,
+                    currentTarget: currentTarget,
+                    srcElement: target,
+                    defaultPrevented: false,
+                    cancelBubble: false,
+                    _stopped: false,
+                    preventDefault: function() { this.defaultPrevented = true; },
+                    stopPropagation: function() { this._stopped = true; this.cancelBubble = true; }
+                };
+            };
         "#;
         let _ = context.eval(Source::from_bytes(browser_preamble.as_bytes()));
 
@@ -1331,33 +1474,7 @@ impl JsRuntime {
     /// Dispatches a click event to `node_id`, bubbling up ancestors if necessary.
     pub fn dispatch_click(&mut self, node_id: NodeId) -> Result<(), JsError> {
         let _guard = ActiveRuntimeGuard::new(&self.inner);
-
-        let mut current = Some(node_id);
-        let mut callbacks = Vec::new();
-        while let Some(curr_id) = current {
-            if let Some(list) = self.inner.borrow().click_listeners.get(&curr_id) {
-                callbacks.extend(list.iter().cloned());
-            }
-            if let Some(cached_obj) = self.inner.borrow().node_cache.get(&curr_id) {
-                if let Ok(onclick_val) = cached_obj.get(js_string!("onclick"), &mut self.context) {
-                    if let Some(cb_obj) = onclick_val.as_callable() {
-                        if let Some(cb) = JsFunction::from_object(cb_obj.clone()) {
-                            callbacks.push(cb);
-                        }
-                    }
-                }
-            }
-            current = self.inner.borrow().doc.parent(curr_id);
-        }
-
-        let target_obj = get_or_create_element_object(node_id, &mut self.context)?;
-        let this_val = JsValue::new(target_obj);
-
-        for cb in callbacks {
-            cb.call(&this_val, &[], &mut self.context)?;
-        }
-
-        Ok(())
+        dispatch_click_with_context(node_id, &mut self.context)
     }
 
     /// Updates `window.location` with the given URL.

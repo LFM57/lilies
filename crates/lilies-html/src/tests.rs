@@ -445,3 +445,44 @@ fn test_script_and_style_raw_text_with_comparison_operators() {
     let st_text = style_text.expect("style tag found");
     assert!(st_text.contains("div > p { color: red; }"));
 }
+
+#[test]
+fn test_nested_list_li_auto_closing_stops_at_ul_and_ol() {
+    let html = "<ul><li>Outer<ul><li>Inner 1<li>Inner 2</ul></li><li>Outer 2</li></ul>";
+    let doc = parse_html(html);
+
+    let root_children = doc.get_children(doc.root());
+    assert_eq!(root_children.len(), 1);
+    let outer_ul = root_children[0];
+    let outer_lis = doc.get_children(outer_ul);
+    assert_eq!(outer_lis.len(), 2, "Outer <ul> must have two <li> children");
+
+    let outer_li1_children = doc.get_children(outer_lis[0]);
+    assert_eq!(outer_li1_children.len(), 2, "First outer <li> must contain text and inner <ul>");
+    let inner_ul = outer_li1_children[1];
+    assert_eq!(
+        doc.node(inner_ul).unwrap().as_element().unwrap().tag_name(),
+        "ul"
+    );
+
+    let inner_lis = doc.get_children(inner_ul);
+    assert_eq!(inner_lis.len(), 2, "Inner <ul> must have two auto-closed <li> children");
+    assert_eq!(doc.text_content(inner_lis[0]), "Inner 1");
+    assert_eq!(doc.text_content(inner_lis[1]), "Inner 2");
+    assert_eq!(doc.text_content(outer_lis[1]), "Outer 2");
+}
+
+#[test]
+fn test_character_reference_decoding_in_text_and_attributes() {
+    let html = r#"<a href="/search?q=a&amp;b=2&amp;c=&#39;ok&#39;" title='1 &lt; 2 &amp; 3 &gt; 0'>Tom &amp; Jerry &mdash; &#169; &#x20AC;10</a>"#;
+    let doc = parse_html(html);
+
+    let a_id = doc.first_child(doc.root()).expect("anchor element");
+    let a_el = doc.node(a_id).unwrap().as_element().unwrap();
+    assert_eq!(
+        a_el.get_attribute("href"),
+        Some("/search?q=a&b=2&c='ok'")
+    );
+    assert_eq!(a_el.get_attribute("title"), Some("1 < 2 & 3 > 0"));
+    assert_eq!(doc.text_content(a_id), "Tom & Jerry \u{2014} \u{00A9} \u{20AC}10");
+}

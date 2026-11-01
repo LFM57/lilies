@@ -107,13 +107,6 @@ pub fn build_layout_tree_with_images(
                         (None, None) => (intrinsic_w, intrinsic_h),
                     };
 
-                    if style.width.is_auto() {
-                        style.width = LengthOrAuto::Px(w);
-                    }
-                    if style.height.is_auto() {
-                        style.height = LengthOrAuto::Px(h);
-                    }
-
                     let mut img_box =
                         LayoutBox::new(BoxType::ImageNode(node_id, Arc::clone(&image)));
                     img_box.dimensions.content.width = w;
@@ -237,6 +230,15 @@ pub fn build_layout_tree_with_images(
     let children = if !is_flex && has_block && has_inline {
         let mut normalized = Vec::new();
         let mut inline_run = Vec::new();
+        let anon_style = ComputedStyle {
+            display: Display::Block,
+            color: style.as_ref().map_or(lilies_css::Color::BLACK, |s| s.color),
+            font_size: style.as_ref().map_or(16.0, |s| s.font_size),
+            text_align: style
+                .as_ref()
+                .map_or(lilies_css::TextAlign::Left, |s| s.text_align),
+            ..Default::default()
+        };
 
         for child in raw_children {
             if child.is_inline() {
@@ -244,7 +246,7 @@ pub fn build_layout_tree_with_images(
             } else {
                 if !inline_run.is_empty() {
                     let mut anon = LayoutBox::new(BoxType::AnonymousBlock);
-                    anon.style = style.clone();
+                    anon.style = Some(anon_style.clone());
                     anon.children = std::mem::take(&mut inline_run);
                     normalized.push(anon);
                 }
@@ -254,7 +256,7 @@ pub fn build_layout_tree_with_images(
 
         if !inline_run.is_empty() {
             let mut anon = LayoutBox::new(BoxType::AnonymousBlock);
-            anon.style = style.clone();
+            anon.style = Some(anon_style);
             anon.children = inline_run;
             normalized.push(anon);
         }

@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 
-use crate::ast::{Declaration, Rule, Selector, StyleSheet, Unit, Value};
+use crate::ast::{Combinator, Declaration, Rule, Selector, StyleSheet, Unit, Value};
 use crate::color::Color;
 use crate::error::CssError;
 
@@ -41,18 +41,38 @@ impl CssParser {
         Ok(stylesheet)
     }
 
-    /// Skips forward to the end of an invalid rule by finding '{' and its matching '}'.
+    /// Skips forward to the end of an invalid rule or statement at-rule (`;` or matching `{ ... }`).
     fn skip_to_rule_end(&mut self) {
+        let mut in_quote: Option<char> = None;
         while let Some(c) = self.peek() {
             self.pos += 1;
-            if c == '{' {
+            if let Some(q) = in_quote {
+                if c == q {
+                    in_quote = None;
+                }
+                continue;
+            }
+            if c == '"' || c == '\'' {
+                in_quote = Some(c);
+            } else if c == ';' {
+                // Statement at-rule such as @charset or @import ends at ';'
+                return;
+            } else if c == '{' {
                 break;
             }
         }
         let mut depth = 1;
         while let Some(c) = self.peek() {
             self.pos += 1;
-            if c == '{' {
+            if let Some(q) = in_quote {
+                if c == q {
+                    in_quote = None;
+                }
+                continue;
+            }
+            if c == '"' || c == '\'' {
+                in_quote = Some(c);
+            } else if c == '{' {
                 depth += 1;
             } else if c == '}' {
                 depth -= 1;
@@ -86,9 +106,19 @@ impl CssParser {
             if self.is_eof() {
                 break;
             }
+            if self.peek() == Some(';') {
+                self.pos += 1;
+                continue;
+            }
 
-            let declaration = self.parse_declaration()?;
-            declarations.push(declaration);
+            match self.parse_declaration() {
+                Ok(declaration) => {
+                    declarations.push(declaration);
+                }
+                Err(_) => {
+                    self.skip_to_declaration_end();
+                }
+            }
 
             self.skip_whitespace_and_comments();
             if self.peek() == Some(';') {
@@ -96,9 +126,10 @@ impl CssParser {
             } else if self.is_eof() {
                 break;
             } else {
-                return Err(CssError::ParseError(
-                    "Expected ';' or EOF after declaration".into(),
-                ));
+                self.skip_to_declaration_end();
+                if matches!(self.peek(), Some(';' | '}')) {
+                    self.pos += 1;
+                }
             }
         }
         Ok(declarations)
@@ -152,14 +183,38 @@ impl CssParser {
         Ok(Rule::new(selectors, declarations))
     }
 
-    /// Parses comma-separated selectors.
+    /// Parses comma-separated selectors, supporting descendant/child combinators and pseudo-classes.
     fn parse_selectors(&mut self) -> Result<Vec<Selector>, CssError> {
         let mut selectors = Vec::new();
 
         loop {
             self.skip_whitespace_and_comments();
-            let selector = self.parse_compound_selector()?;
-            selectors.push(selector);
+            if self.is_eof() || self.peek() == Some('{') {
+                break;
+            }
+
+            // If a rule starts with '@', fail immediately so skip_to_rule_end handles the at-rule
+            if selectors.is_empty() && self.peek() == Some('@') {
+                return Err(CssError::ParseError("At-rule not supported as style rule".into()));
+            }
+
+            match self.parse_complex_selector() {
+                Ok(selector) => {
+                    selectors.push(selector);
+                }
+                Err(_) => {
+                    // Skip to the next ',' or '{' so one unsupported selector doesn't drop valid sibling selectors
+                    while let Some(c) = self.peek() {
+                        if c == ',' || c == '{' || c == ';' {
+                            break;
+                        }
+                        self.pos += 1;
+                    }
+                    if self.peek() == Some(';') {
+                        return Err(CssError::ParseError("Invalid selector before ';'".into()));
+                    }
+                }
+            }
 
             self.skip_whitespace_and_comments();
             if self.peek() == Some(',') {
@@ -172,19 +227,59 @@ impl CssParser {
         Ok(selectors)
     }
 
-    /// Parses a single compound selector (e.g. `div`, `.box`, `#main`, `div.box`, `div#main.box`).
+    /// Parses a complex selector consisting of one or more compound selectors joined by combinators.
+    fn parse_complex_selector(&mut self) -> Result<Selector, CssError> {
+        let mut current = self.parse_compound_selector()?;
+
+        loop {
+            let pos_before_ws = self.pos;
+            self.skip_whitespace_and_comments();
+            let had_ws = self.pos > pos_before_ws;
+
+            match self.peek() {
+                None | Some(',') | Some('{') => break,
+                Some('>') => {
+                    self.pos += 1;
+                    self.skip_whitespace_and_comments();
+                    let mut next = self.parse_compound_selector()?;
+                    next.parent = Some((Combinator::Child, Box::new(current)));
+                    current = next;
+                }
+                Some(_) if had_ws => {
+                    let mut next = self.parse_compound_selector()?;
+                    next.parent = Some((Combinator::Descendant, Box::new(current)));
+                    current = next;
+                }
+                Some(ch) => {
+                    return Err(CssError::ParseError(format!(
+                        "Unexpected character '{}' in selector at position {}",
+                        ch, self.pos
+                    )));
+                }
+            }
+        }
+
+        Ok(current)
+    }
+
+    /// Parses a single compound selector (e.g. `div`, `.box`, `#main`, `div.box`, `a:hover`, `*`).
     fn parse_compound_selector(&mut self) -> Result<Selector, CssError> {
         let mut tag_name = None;
         let mut id = None;
         let mut classes = Vec::new();
+        let mut pseudo_classes = Vec::new();
+        let mut has_universal = false;
 
         if let Some(ch) = self.peek() {
-            if is_ident_start(ch) {
+            if ch == '*' {
+                self.pos += 1;
+                has_universal = true;
+            } else if is_ident_start(ch) {
                 tag_name = Some(self.parse_identifier()?);
             }
         }
 
-        // Parse immediately chained .class or #id without intervening whitespace
+        // Parse immediately chained .class, #id, or :pseudo-class without intervening whitespace
         loop {
             match self.peek() {
                 Some('.') => {
@@ -197,11 +292,46 @@ impl CssParser {
                     let id_name = self.parse_identifier()?;
                     id = Some(id_name);
                 }
+                Some(':') => {
+                    self.pos += 1;
+                    let is_pseudo_element = if self.peek() == Some(':') {
+                        self.pos += 1;
+                        true
+                    } else {
+                        false
+                    };
+                    let name = self.parse_identifier()?.to_ascii_lowercase();
+                    if self.peek() == Some('(') {
+                        self.pos += 1;
+                        let mut depth = 1;
+                        while let Some(c) = self.peek() {
+                            self.pos += 1;
+                            if c == '(' {
+                                depth += 1;
+                            } else if c == ')' {
+                                depth -= 1;
+                                if depth == 0 {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                    if is_pseudo_element {
+                        pseudo_classes.push(format!("::{}", name));
+                    } else {
+                        pseudo_classes.push(name);
+                    }
+                }
                 _ => break,
             }
         }
 
-        if tag_name.is_none() && id.is_none() && classes.is_empty() {
+        if tag_name.is_none()
+            && id.is_none()
+            && classes.is_empty()
+            && pseudo_classes.is_empty()
+            && !has_universal
+        {
             return Err(CssError::ParseError(format!(
                 "Invalid selector at position {}",
                 self.pos
@@ -212,10 +342,12 @@ impl CssParser {
             tag_name,
             id,
             classes,
+            pseudo_classes,
+            parent: None,
         })
     }
 
-    /// Parses a property declaration: `name: value`.
+    /// Parses a property declaration: `name: value [!important]`.
     fn parse_declaration(&mut self) -> Result<Declaration, CssError> {
         let name = self.parse_identifier()?;
 
@@ -224,12 +356,27 @@ impl CssParser {
         self.skip_whitespace_and_comments();
 
         let mut values = Vec::new();
+        let mut important = false;
         while let Some(ch) = self.peek() {
             if ch == ';' || ch == '}' {
                 break;
             }
             if ch == ',' || ch == '/' {
                 self.pos += 1;
+                self.skip_whitespace_and_comments();
+                continue;
+            }
+            if ch == '!' {
+                self.pos += 1;
+                self.skip_whitespace_and_comments();
+                let ident = self.parse_identifier()?;
+                if !ident.eq_ignore_ascii_case("important") {
+                    return Err(CssError::ParseError(format!(
+                        "Expected 'important' after '!', found '{}'",
+                        ident
+                    )));
+                }
+                important = true;
                 self.skip_whitespace_and_comments();
                 continue;
             }
@@ -249,7 +396,7 @@ impl CssParser {
             _ => Value::List(values),
         };
 
-        Ok(Declaration::new(name, value))
+        Ok(Declaration::new_important(name, value, important))
     }
 
     /// Parses a single value token: hex color, length/dimension, keyword, or named color.

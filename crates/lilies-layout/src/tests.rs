@@ -1031,6 +1031,137 @@ fn test_build_layout_tree_with_image_cache_and_html_attributes() {
 }
 
 #[test]
+fn test_build_layout_tree_image_max_width_preserves_aspect_ratio() {
+    let doc = parse_html(
+        r#"<html><body><img src="https://example.com/wide.png" style="max-width: 250px;" /></body></html>"#,
+    );
+    let html_id = doc
+        .get_children(doc.root())
+        .into_iter()
+        .find(|&id| {
+            doc.node(id)
+                .and_then(|n| n.as_element())
+                .is_some_and(|el| el.tag_name() == "html")
+        })
+        .expect("html");
+
+    let mut cache = std::collections::HashMap::new();
+    let img_data = std::sync::Arc::new(crate::DecodedImage::new(400, 200, vec![0; 400 * 200 * 4]));
+    cache.insert("https://example.com/wide.png".to_string(), img_data);
+
+    let style_tree = lilies_css::compute_styles_for_document(&doc);
+    let mut layout_tree = crate::tree_builder::build_layout_tree_with_images(
+        html_id,
+        doc.arena(),
+        &style_tree,
+        &cache,
+    )
+    .expect("layout tree");
+
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0));
+    layout_tree.layout(cb);
+
+    let body_box = &layout_tree.children[0];
+    let img_box = if body_box.children[0].is_image() {
+        &body_box.children[0]
+    } else {
+        &body_box.children[0].children[0]
+    };
+    assert!(img_box.is_image());
+    assert_eq!(img_box.dimensions.content.width, 250.0);
+    assert_eq!(img_box.dimensions.content.height, 125.0);
+}
+
+#[test]
+fn test_anonymous_block_does_not_duplicate_parent_padding_or_margin() {
+    let doc = parse_html(
+        r#"<html><body><div style="padding: 24px; margin: 40px; background-color: #112233; text-align: center;"><p>Block</p><span>Inline</span></div></body></html>"#,
+    );
+    let html_id = doc
+        .get_children(doc.root())
+        .into_iter()
+        .find(|&id| {
+            doc.node(id)
+                .and_then(|n| n.as_element())
+                .is_some_and(|el| el.tag_name() == "html")
+        })
+        .expect("html");
+
+    let style_tree = lilies_css::compute_styles_for_document(&doc);
+    let layout_tree = crate::tree_builder::build_layout_tree(html_id, doc.arena(), &style_tree)
+        .expect("layout tree");
+
+    let body_box = &layout_tree.children[0];
+    let div_box = &body_box.children[0];
+    let anon_box = &div_box.children[1];
+    assert!(anon_box.is_anonymous());
+
+    let anon_style = anon_box.style.as_ref().expect("anon style");
+    assert_eq!(anon_style.padding_top, 0.0);
+    assert_eq!(anon_style.padding_left, 0.0);
+    assert_eq!(anon_style.margin_top, LengthOrAuto::Px(0.0));
+    assert_eq!(anon_style.background_color, lilies_css::Color::TRANSPARENT);
+    assert_eq!(anon_style.text_align, lilies_css::TextAlign::Center);
+}
+
+#[test]
+fn test_inline_siblings_flow_horizontally_and_nested_inlines_do_not_overlap() {
+    let doc = parse_html(
+        r##"<html><body>
+            <p id="p1">Hello <b>world</b> and <a href="#"><span>A</span><span>B</span></a></p>
+            <div id="narrow" style="width: 120px;"><span>One two three four five six seven eight</span></div>
+        </body></html>"##,
+    );
+    let html_id = doc
+        .get_children(doc.root())
+        .into_iter()
+        .find(|&id| {
+            doc.node(id)
+                .and_then(|n| n.as_element())
+                .is_some_and(|el| el.tag_name() == "html")
+        })
+        .expect("html");
+
+    let style_tree = lilies_css::compute_styles_for_document(&doc);
+    let mut layout_tree =
+        crate::tree_builder::build_layout_tree(html_id, doc.arena(), &style_tree)
+            .expect("layout tree");
+    layout_tree.layout(Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0)));
+
+    let body = &layout_tree.children[0];
+    let p1 = &body.children[0];
+    assert_eq!(p1.children.len(), 4);
+
+    // 1. Sibling inlines in <p> flow horizontally on the same line
+    let c0 = &p1.children[0];
+    let c1 = &p1.children[1];
+    let c2 = &p1.children[2];
+    let c3 = &p1.children[3];
+    assert!(c0.dimensions.content.x < c1.dimensions.content.x);
+    assert!(c1.dimensions.content.x < c2.dimensions.content.x);
+    assert!(c2.dimensions.content.x < c3.dimensions.content.x);
+    assert_eq!(c0.dimensions.content.y, c1.dimensions.content.y);
+    assert_eq!(c1.dimensions.content.y, c2.dimensions.content.y);
+    assert_eq!(c2.dimensions.content.y, c3.dimensions.content.y);
+
+    // 2. Nested <span>A</span> and <span>B</span> inside <a> do not overlap
+    assert_eq!(c3.children.len(), 2);
+    let span_a = &c3.children[0];
+    let span_b = &c3.children[1];
+    assert!(
+        span_a.dimensions.content.x + span_a.dimensions.content.width
+            <= span_b.dimensions.content.x + 0.01
+    );
+
+    // 3. Text inside <span> inside narrow <div> wraps across multiple lines
+    let narrow_div = &body.children[1];
+    let narrow_span = &narrow_div.children[0];
+    let narrow_text = &narrow_span.children[0];
+    assert!(narrow_text.lines.len() >= 2);
+    assert!(narrow_div.dimensions.content.height > 20.0);
+}
+
+#[test]
 fn test_missing_image_fallback_to_alt_text() {
     let doc = parse_html(r#"<html><body><img src="missing.png" alt="Fallback Alt" /></body></html>"#);
     let html_id = doc.get_children(doc.root()).into_iter().find(|&id| {

@@ -61,7 +61,9 @@ fn render_borders(layout_box: &LayoutBox, list: &mut DisplayList) {
     if border.top > 0.0 || border.right > 0.0 || border.bottom > 0.0 || border.left > 0.0 {
         let border_box = layout_box.dimensions.border_box();
         if border_box.width > 0.0 && border_box.height > 0.0 {
-            let color = layout_box.get_style().map_or(Color::BLACK, |s| s.color);
+            let color = layout_box
+                .get_style()
+                .map_or(Color::BLACK, |s| s.border_color.unwrap_or(s.color));
             list.push(DisplayItem::Border {
                 rect: border_box,
                 widths: border,

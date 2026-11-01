@@ -1,6 +1,6 @@
 #![deny(unsafe_code)]
 
-use crate::ast::Selector;
+use crate::ast::{Combinator, Selector};
 use lilies_dom::{Arena, Document, NodeId};
 
 /// Determines whether a DOM node matches the given selector.
@@ -32,6 +32,80 @@ pub fn matches(selector: &Selector, node_id: NodeId, dom: &Arena) -> bool {
     for class in &selector.classes {
         if !element.has_class(class) {
             return false;
+        }
+    }
+
+    // Check pseudo-classes
+    for pc in &selector.pseudo_classes {
+        match pc.as_str() {
+            "link" | "any-link" => {
+                if !element.tag_name().eq_ignore_ascii_case("a")
+                    || element.get_attribute("href").is_none()
+                {
+                    return false;
+                }
+            }
+            "root" => {
+                if !element.tag_name().eq_ignore_ascii_case("html") {
+                    return false;
+                }
+            }
+            "first-child" => {
+                if node.parent.is_none() {
+                    return false;
+                }
+                let mut prev = node.prev_sibling;
+                while let Some(sib_id) = prev {
+                    if let Some(sib) = dom.get(sib_id) {
+                        if sib.as_element().is_some() {
+                            return false;
+                        }
+                        prev = sib.prev_sibling;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            "last-child" => {
+                if node.parent.is_none() {
+                    return false;
+                }
+                let mut next = node.next_sibling;
+                while let Some(sib_id) = next {
+                    if let Some(sib) = dom.get(sib_id) {
+                        if sib.as_element().is_some() {
+                            return false;
+                        }
+                        next = sib.next_sibling;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            // Interactive/visited/pseudo-element states do not match in static DOM evaluation
+            _ => return false,
+        }
+    }
+
+    // Check ancestor combinators
+    if let Some((combinator, ref parent_sel)) = selector.parent {
+        match combinator {
+            Combinator::Child => {
+                let Some(parent_id) = node.parent else {
+                    return false;
+                };
+                return matches(parent_sel, parent_id, dom);
+            }
+            Combinator::Descendant => {
+                let mut curr = node.parent;
+                while let Some(anc_id) = curr {
+                    if matches(parent_sel, anc_id, dom) {
+                        return true;
+                    }
+                    curr = dom.get(anc_id).and_then(|n| n.parent);
+                }
+                return false;
+            }
         }
     }
 

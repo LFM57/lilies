@@ -8,7 +8,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange?logo=rust)](https://www.rust-lang.org/)
 [![Safety](https://img.shields.io/badge/unsafe-%23!%5Bdeny(unsafe__code)%5D-success?style=flat)](crates/)
-[![Tests](https://img.shields.io/badge/tests-88%20passed-brightgreen?logo=checkmarx)](crates/)
+[![Tests](https://img.shields.io/badge/tests-127%20passed-brightgreen?logo=checkmarx)](crates/)
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey?logo=linux)](crates/lilies-shell)
 
 </div>
@@ -40,16 +40,17 @@ cargo run -p lilies-shell -- file:///path/to/page.html
 ## ✨ Features
 
 - **🌐 Live HTTP / HTTPS & File Fetching**: TLS network stack powered by `ureq` with redirects, custom User-Agent, and `file://` local URL handling.
-- **📄 WHATWG HTML Parsing**: Resilient tokenizer and tree constructor supporting self-closing tags, nested hierarchies, and automated paragraph auto-closing (`<p>` tag repair).
-- **🎨 CSS Cascade & Inheritance**: Parser supporting CSS selectors (element, class, ID, combinations), specificity calculation, inline `style="..."` overrides, `<style>` block extraction, and external `<link rel="stylesheet">` fetching with URL resolution.
-- **📏 Flexible Units & Layout**: Concrete pixel resolution for `px`, `em`, and `rem` units based on element and root document font-sizes.
-- **📦 CSS Box Model**: Block Formatting Context (BFC) with horizontal margins, padding, border calculations, centering with `margin: auto`, and `max-width` clamping.
+- **📄 WHATWG HTML Parsing**: Resilient tokenizer and tree constructor supporting character reference decoding (`&amp;`, `&lt;`, `&mdash;`, numeric `&#...;` / `&#x...;`), raw text elements (`<script>`, `<style>`), self-closing tags, and automated `<p>` / scoped `<li>` auto-closing.
+- **🎨 CSS Cascade & Inheritance**: Parser supporting compound, descendant (`div p`), child (`div > p`), and pseudo-class selectors, `@charset`/`@import` handling, `!important` precedence, specificity calculation, inline `style="..."` overrides, `<style>` block extraction, and external `<link rel="stylesheet">` fetching with caching.
+- **📏 Flexible Units, Box Model & Flexbox**: Concrete pixel resolution for `px`, `em`, `rem`, `vh`, `vw`, and `pt`; Block Formatting Context (BFC) with margins, padding, CSS borders (`border`, `border-width`, `border-color`), `margin: auto` centering, and `max-width`; Horizontal Inline Formatting Context (IFC); and CSS Flexbox (`display: flex`, `flex-direction`, `justify-content`, `align-items`, `gap`, `flex-grow`).
+- **⚡ JavaScript Engine & DOM Bindings (`lilies-js`)**: Embedded ECMAScript runtime powered by `boa_engine` supporting `<script>` and external `<script src="...">` execution, `document.getElementById` / `querySelector`, live DOM tree mutation (`createElement`, `appendChild`, `insertBefore`, `removeChild`, `textContent`, `setAttribute`, `style`), and `addEventListener("click", ...)` with DOM event bubbling.
 - **🔤 Typography & Alignment**: Glyph text measurement and line wrapping via `fontdue`, multi-line reflow, line-height calculation, and `text-align` (`left`, `center`, `right`).
-- **🖌️ Display List & Alpha Blending**: Display list IR intermediate compilation, software rasterizer with per-pixel alpha blending, background color rendering, and softbuffer frame presentation.
+- **🖌️ Display List & Alpha Blending**: Display list IR intermediate compilation, software rasterizer with per-pixel alpha blending, background and border rendering, and softbuffer frame presentation.
 - **🖼️ Image Rendering & Replaced Element Layout (`<img>`)**: Binary asset fetching (`png`, `jpeg`, `webp`, `gif`), thread-safe image caching (`ImageCache`), replaced element layout with intrinsic aspect ratio preservation (`width`, `height`, `max-width`), and Porter-Duff Source-Over alpha blending with viewport clipping.
 - **🖱️ Interactive Browser Shell**:
   - URL address bar with click-to-focus, text cursor, and full typing/backspace editing.
-  - Hyperlink hit-testing with dynamic pointer cursor and one-click navigation.
+  - Built-in demo pages (`about:welcome`, `about:images`, `about:flex`, `about:js`).
+  - Hyperlink and interactive element hit-testing with dynamic pointer cursor, click event dispatch, and one-click navigation.
   - Linear browsing history stack with backward navigation (`Alt + Left` or `Backspace`).
   - Smooth vertical mouse-wheel scrolling.
 - **🛡️ 100% Safe Rust**: `#![deny(unsafe_code)]` enforced across every single crate.
@@ -61,8 +62,9 @@ cargo run -p lilies-shell -- file:///path/to/page.html
 ```mermaid
 flowchart LR
     HTML["HTML / HTTP"] --> DOM["lilies-dom<br/>(DOM Tree)"]
+    DOM <--> JS["lilies-js<br/>(Boa JS Runtime & Events)"]
     CSS["CSS / &lt;link&gt;"] --> Stylesheet["lilies-css<br/>(Style Cascade)"]
-    DOM & Stylesheet --> Layout["lilies-layout<br/>(Box Tree & Text Wrap)"]
+    DOM & Stylesheet --> Layout["lilies-layout<br/>(Block, Inline & Flex Layout)"]
     Layout --> DisplayList["lilies-paint<br/>(Display List IR)"]
     DisplayList --> Pixmap["lilies-paint<br/>(Software Rasterizer)"]
     Pixmap --> Shell["lilies-shell<br/>(Desktop Window & softbuffer)"]
@@ -75,12 +77,13 @@ flowchart LR
 | Crate | Directory | Purpose |
 |---|---|---|
 | `lilies-dom` | [`crates/lilies-dom`](crates/lilies-dom) | Arena-allocated DOM tree (`Node`, `Element`, `Text`, `Document`) with cyclic-dependency prevention. |
-| `lilies-html` | [`crates/lilies-html`](crates/lilies-html) | HTML tokenizer and tree builder, auto-closing mechanics, and `<style>`/`<link>` style source extraction. |
-| `lilies-css` | [`crates/lilies-css`](crates/lilies-css) | CSS parser, specificity sorting, cascade resolution, inheritance, and `px`/`em`/`rem` unit resolver. |
-| `lilies-layout` | [`crates/lilies-layout`](crates/lilies-layout) | Box model layout engine, anonymous block grouping, text wrapping, `max-width`, and `text-align`. |
-| `lilies-paint` | [`crates/lilies-paint`](crates/lilies-paint) | Display list compiler, software rasterizer with alpha blending, and pixel buffer export. |
-| `lilies-net` | [`crates/lilies-net`](crates/lilies-net) | HTTP/HTTPS and `file://` fetcher with TLS and configurable request headers. |
-| `lilies-shell` | [`crates/lilies-shell`](crates/lilies-shell) | Desktop browser UI (`winit` + `softbuffer`), address bar, hit-testing, link clicks, and event loop. |
+| `lilies-html` | [`crates/lilies-html`](crates/lilies-html) | HTML tokenizer with entity decoding, tree builder, auto-closing mechanics, and `<style>`/`<link>` extraction. |
+| `lilies-css` | [`crates/lilies-css`](crates/lilies-css) | CSS parser, combinator/pseudo-class matcher, specificity & `!important` cascade, borders, and unit resolver. |
+| `lilies-layout` | [`crates/lilies-layout`](crates/lilies-layout) | Block, inline, replaced image, and flexbox layout engine with text wrapping, `max-width`, and `text-align`. |
+| `lilies-paint` | [`crates/lilies-paint`](crates/lilies-paint) | Display list compiler, software rasterizer with alpha blending, borders, and pixel buffer export. |
+| `lilies-net` | [`crates/lilies-net`](crates/lilies-net) | HTTP/HTTPS and `file://` fetcher with TLS, image decoding, and `ImageCache`. |
+| `lilies-js` | [`crates/lilies-js`](crates/lilies-js) | ECMAScript engine (`boa_engine`) with `window`/`document` DOM bindings, style mutation, and click event bubbling. |
+| `lilies-shell` | [`crates/lilies-shell`](crates/lilies-shell) | Desktop browser UI (`winit` + `softbuffer`), address bar, hit-testing, JS event dispatch, and navigation loop. |
 
 ---
 

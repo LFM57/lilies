@@ -30,9 +30,27 @@ impl fmt::Display for Specificity {
 impl Selector {
     /// Computes the specificity of this selector: (ID count, Class count, Tag count).
     pub fn specificity(&self) -> Specificity {
-        let id_count = if self.id.is_some() { 1 } else { 0 };
-        let class_count = self.classes.len();
-        let tag_count = if self.tag_name.is_some() { 1 } else { 0 };
+        let mut id_count = if self.id.is_some() { 1 } else { 0 };
+        let mut class_count = self.classes.len()
+            + self
+                .pseudo_classes
+                .iter()
+                .filter(|p| !p.starts_with("::"))
+                .count();
+        let mut tag_count = if self.tag_name.is_some() { 1 } else { 0 }
+            + self
+                .pseudo_classes
+                .iter()
+                .filter(|p| p.starts_with("::"))
+                .count();
+
+        if let Some((_, ref parent)) = self.parent {
+            let p_spec = parent.specificity();
+            id_count += p_spec.0;
+            class_count += p_spec.1;
+            tag_count += p_spec.2;
+        }
+
         Specificity::new(id_count, class_count, tag_count)
     }
 }

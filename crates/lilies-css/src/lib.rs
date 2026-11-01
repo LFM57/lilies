@@ -8,7 +8,7 @@ pub mod matcher;
 pub mod parser;
 pub mod specificity;
 
-pub use ast::{Declaration, Rule, Selector, StyleSheet, Stylesheet, Unit, Value};
+pub use ast::{Combinator, Declaration, Rule, Selector, StyleSheet, Stylesheet, Unit, Value};
 pub use color::Color;
 pub use computed::{
     compute_styles, compute_styles_for_document, parse_styles_from_document, resolve_length,
