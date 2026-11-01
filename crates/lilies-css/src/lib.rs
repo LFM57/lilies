@@ -1,40 +1,20 @@
 #![deny(unsafe_code)]
 
-use thiserror::Error;
+pub mod ast;
+pub mod color;
+pub mod computed;
+pub mod error;
+pub mod matcher;
+pub mod parser;
+pub mod specificity;
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum CssError {
-    #[error("CSS Parse error: {0}")]
-    ParseError(String),
-}
+pub use ast::{Declaration, Rule, Selector, StyleSheet, Stylesheet, Unit, Value};
+pub use color::Color;
+pub use computed::{compute_styles, ComputedStyle, Display, LengthOrAuto, StyleTree};
+pub use error::CssError;
+pub use matcher::{matches, matches_document};
+pub use parser::{parse_stylesheet, CssParser};
+pub use specificity::Specificity;
 
-/// A CSS declaration consisting of a property name and its value.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Declaration {
-    pub name: String,
-    pub value: String,
-}
-
-/// A CSS rule consisting of selectors and declarations.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Rule {
-    pub selectors: Vec<String>,
-    pub declarations: Vec<Declaration>,
-}
-
-/// A parsed CSS StyleSheet.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct StyleSheet {
-    pub rules: Vec<Rule>,
-}
-
-impl StyleSheet {
-    pub fn new() -> Self {
-        Self { rules: Vec::new() }
-    }
-}
-
-/// Placeholder CSS parser for Milestone 1.
-pub fn parse_stylesheet(_css: &str) -> Result<StyleSheet, CssError> {
-    Ok(StyleSheet::new())
-}
+#[cfg(test)]
+mod tests;

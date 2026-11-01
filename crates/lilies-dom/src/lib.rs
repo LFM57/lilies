@@ -8,6 +8,7 @@ pub mod node;
 pub use arena::{Arena, NodeId};
 pub use document::Document;
 pub use error::DomError;
+pub use indexmap::IndexMap;
 pub use node::{DocumentType, Element, Node, NodeType, Text};
 
 #[cfg(test)]

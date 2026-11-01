@@ -1,0 +1,445 @@
+#![deny(unsafe_code)]
+
+use crate::ast::{Declaration, Rule, Selector, StyleSheet, Unit, Value};
+use crate::color::Color;
+use crate::error::CssError;
+
+/// Parser for CSS stylesheets conforming to the Milestone 2 requirements.
+pub struct CssParser {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl CssParser {
+    pub fn new(input: &str) -> Self {
+        Self {
+            chars: input.chars().collect(),
+            pos: 0,
+        }
+    }
+
+    /// Parses the entire input into a `StyleSheet`.
+    pub fn parse_stylesheet(&mut self) -> Result<StyleSheet, CssError> {
+        let mut stylesheet = StyleSheet::new();
+
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.is_eof() {
+                break;
+            }
+
+            let rule = self.parse_rule()?;
+            stylesheet.add_rule(rule);
+        }
+
+        Ok(stylesheet)
+    }
+
+    /// Parses a single rule: `selectors { declarations }`.
+    fn parse_rule(&mut self) -> Result<Rule, CssError> {
+        let selectors = self.parse_selectors()?;
+        if selectors.is_empty() {
+            return Err(CssError::ParseError(
+                "Expected at least one selector".into(),
+            ));
+        }
+
+        self.skip_whitespace_and_comments();
+        self.consume_char('{')?;
+
+        let mut declarations = Vec::new();
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.peek() == Some('}') {
+                self.pos += 1;
+                break;
+            }
+            if self.is_eof() {
+                return Err(CssError::UnexpectedEof);
+            }
+
+            let declaration = self.parse_declaration()?;
+            declarations.push(declaration);
+
+            self.skip_whitespace_and_comments();
+            if self.peek() == Some(';') {
+                self.pos += 1;
+            } else if self.peek() == Some('}') {
+                // Trailing declaration without semicolon is valid CSS
+            } else {
+                return Err(CssError::ParseError(
+                    "Expected ';' or '}' after declaration".into(),
+                ));
+            }
+        }
+
+        Ok(Rule::new(selectors, declarations))
+    }
+
+    /// Parses comma-separated selectors.
+    fn parse_selectors(&mut self) -> Result<Vec<Selector>, CssError> {
+        let mut selectors = Vec::new();
+
+        loop {
+            self.skip_whitespace_and_comments();
+            let selector = self.parse_compound_selector()?;
+            selectors.push(selector);
+
+            self.skip_whitespace_and_comments();
+            if self.peek() == Some(',') {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        Ok(selectors)
+    }
+
+    /// Parses a single compound selector (e.g. `div`, `.box`, `#main`, `div.box`, `div#main.box`).
+    fn parse_compound_selector(&mut self) -> Result<Selector, CssError> {
+        let mut tag_name = None;
+        let mut id = None;
+        let mut classes = Vec::new();
+
+        if let Some(ch) = self.peek() {
+            if is_ident_start(ch) {
+                tag_name = Some(self.parse_identifier()?);
+            }
+        }
+
+        // Parse immediately chained .class or #id without intervening whitespace
+        loop {
+            match self.peek() {
+                Some('.') => {
+                    self.pos += 1;
+                    let class_name = self.parse_identifier()?;
+                    classes.push(class_name);
+                }
+                Some('#') => {
+                    self.pos += 1;
+                    let id_name = self.parse_identifier()?;
+                    id = Some(id_name);
+                }
+                _ => break,
+            }
+        }
+
+        if tag_name.is_none() && id.is_none() && classes.is_empty() {
+            return Err(CssError::ParseError(format!(
+                "Invalid selector at position {}",
+                self.pos
+            )));
+        }
+
+        Ok(Selector {
+            tag_name,
+            id,
+            classes,
+        })
+    }
+
+    /// Parses a property declaration: `name: value`.
+    fn parse_declaration(&mut self) -> Result<Declaration, CssError> {
+        let name = self.parse_identifier()?;
+
+        self.skip_whitespace_and_comments();
+        self.consume_char(':')?;
+        self.skip_whitespace_and_comments();
+
+        let mut values = Vec::new();
+        while let Some(ch) = self.peek() {
+            if ch == ';' || ch == '}' {
+                break;
+            }
+            let val = self.parse_single_value()?;
+            values.push(val);
+            self.skip_whitespace_and_comments();
+        }
+
+        let value = match values.len() {
+            0 => {
+                return Err(CssError::ParseError(format!(
+                    "Declaration for '{}' has no value",
+                    name
+                )))
+            }
+            1 => values.remove(0),
+            _ => Value::List(values),
+        };
+
+        Ok(Declaration::new(name, value))
+    }
+
+    /// Parses a single value token: hex color, length/dimension, keyword, or named color.
+    fn parse_single_value(&mut self) -> Result<Value, CssError> {
+        self.skip_whitespace_and_comments();
+
+        let ch = self.peek().ok_or(CssError::UnexpectedEof)?;
+
+        if ch == '#' {
+            // Hex color
+            self.pos += 1;
+            let start = self.pos;
+            while let Some(c) = self.peek() {
+                if c.is_ascii_hexdigit() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            let hex_str: String = self.chars[start..self.pos].iter().collect();
+            let color = Color::from_hex(&hex_str).ok_or_else(|| {
+                CssError::ParseError(format!("Invalid hex color: '#{}'", hex_str))
+            })?;
+            return Ok(Value::Color(color));
+        }
+
+        if ch.is_ascii_digit() || ch == '-' || ch == '+' || ch == '.' {
+            // Check if this is indeed a number
+            let start = self.pos;
+            if ch == '-' || ch == '+' {
+                self.pos += 1;
+            }
+            let mut has_digit = false;
+            while let Some(c) = self.peek() {
+                if c.is_ascii_digit() {
+                    has_digit = true;
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            if self.peek() == Some('.') {
+                self.pos += 1;
+                while let Some(c) = self.peek() {
+                    if c.is_ascii_digit() {
+                        has_digit = true;
+                        self.pos += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+
+            if has_digit {
+                let num_str: String = self.chars[start..self.pos].iter().collect();
+                let num: f32 = num_str.parse().map_err(|_| {
+                    CssError::ParseError(format!("Invalid numeric value: '{}'", num_str))
+                })?;
+
+                // Check for unit (e.g. px)
+                if let Some(c) = self.peek() {
+                    if is_ident_start(c) {
+                        let unit_str = self.parse_identifier()?;
+                        if unit_str.eq_ignore_ascii_case("px") {
+                            return Ok(Value::Length(num, Unit::Px));
+                        } else {
+                            return Err(CssError::ParseError(format!(
+                                "Unsupported unit: '{}'",
+                                unit_str
+                            )));
+                        }
+                    }
+                }
+
+                // If zero without unit, or plain number, default to Px for length
+                return Ok(Value::Length(num, Unit::Px));
+            } else {
+                // Rewind if it was just a '-' not followed by a digit
+                self.pos = start;
+            }
+        }
+
+        if is_ident_start(ch) {
+            let ident = self.parse_identifier()?;
+
+            // Check for functional notation: rgb(...) or rgba(...)
+            if (ident.eq_ignore_ascii_case("rgb") || ident.eq_ignore_ascii_case("rgba"))
+                && self.peek() == Some('(')
+            {
+                return self.parse_rgb_function(&ident);
+            }
+
+            // Check if it's a recognized named color
+            if let Some(color) = Color::from_name(&ident) {
+                return Ok(Value::Color(color));
+            }
+
+            return Ok(Value::Keyword(ident));
+        }
+
+        // Quoted string
+        if ch == '"' || ch == '\'' {
+            let quote = ch;
+            self.pos += 1;
+            let start = self.pos;
+            while let Some(c) = self.peek() {
+                if c == quote {
+                    let s: String = self.chars[start..self.pos].iter().collect();
+                    self.pos += 1;
+                    return Ok(Value::Keyword(s));
+                }
+                self.pos += 1;
+            }
+            return Err(CssError::UnexpectedEof);
+        }
+
+        Err(CssError::ParseError(format!(
+            "Unexpected character '{}' at position {}",
+            ch, self.pos
+        )))
+    }
+
+    /// Parses functional color notation: `rgb(r, g, b)` or `rgba(r, g, b, a)`.
+    fn parse_rgb_function(&mut self, fn_name: &str) -> Result<Value, CssError> {
+        self.consume_char('(')?;
+        self.skip_whitespace_and_comments();
+
+        let r = self.parse_u8_component()?;
+        self.skip_whitespace_and_comments();
+        self.consume_char(',')?;
+        self.skip_whitespace_and_comments();
+
+        let g = self.parse_u8_component()?;
+        self.skip_whitespace_and_comments();
+        self.consume_char(',')?;
+        self.skip_whitespace_and_comments();
+
+        let b = self.parse_u8_component()?;
+        self.skip_whitespace_and_comments();
+
+        let a = if fn_name.eq_ignore_ascii_case("rgba") && self.peek() == Some(',') {
+            self.consume_char(',')?;
+            self.skip_whitespace_and_comments();
+            // Alpha could be float 0.0-1.0 or u8
+            let start = self.pos;
+            while let Some(c) = self.peek() {
+                if c.is_ascii_digit() || c == '.' {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+            let alpha_str: String = self.chars[start..self.pos].iter().collect();
+            let alpha_f: f32 = alpha_str.parse().map_err(|_| {
+                CssError::ParseError(format!("Invalid alpha in rgba(): '{}'", alpha_str))
+            })?;
+            if alpha_f <= 1.0 {
+                (alpha_f * 255.0).round() as u8
+            } else {
+                alpha_f.min(255.0) as u8
+            }
+        } else {
+            255
+        };
+
+        self.skip_whitespace_and_comments();
+        self.consume_char(')')?;
+
+        Ok(Value::Color(Color::rgba(r, g, b, a)))
+    }
+
+    fn parse_u8_component(&mut self) -> Result<u8, CssError> {
+        let start = self.pos;
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+        let s: String = self.chars[start..self.pos].iter().collect();
+        s.parse::<u8>()
+            .map_err(|_| CssError::ParseError(format!("Invalid color component: '{}'", s)))
+    }
+
+    /// Parses a CSS identifier: `[a-zA-Z_-][a-zA-Z0-9_-]*`.
+    fn parse_identifier(&mut self) -> Result<String, CssError> {
+        let start = self.pos;
+        let Some(first) = self.peek() else {
+            return Err(CssError::UnexpectedEof);
+        };
+        if !is_ident_start(first) {
+            return Err(CssError::ParseError(format!(
+                "Expected identifier start, found '{}'",
+                first
+            )));
+        }
+        self.pos += 1;
+
+        while let Some(c) = self.peek() {
+            if is_ident_char(c) {
+                self.pos += 1;
+            } else {
+                break;
+            }
+        }
+
+        Ok(self.chars[start..self.pos].iter().collect())
+    }
+
+    /// Skips all whitespace and `/* ... */` comments.
+    pub fn skip_whitespace_and_comments(&mut self) {
+        loop {
+            // Whitespace
+            while let Some(c) = self.peek() {
+                if c.is_ascii_whitespace() {
+                    self.pos += 1;
+                } else {
+                    break;
+                }
+            }
+
+            // Comments
+            if self.peek() == Some('/') && self.chars.get(self.pos + 1) == Some(&'*') {
+                self.pos += 2; // skip /*
+                while self.pos < self.chars.len() {
+                    if self.chars[self.pos] == '*' && self.chars.get(self.pos + 1) == Some(&'/') {
+                        self.pos += 2; // skip */
+                        break;
+                    }
+                    self.pos += 1;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn consume_char(&mut self, expected: char) -> Result<(), CssError> {
+        match self.peek() {
+            Some(c) if c == expected => {
+                self.pos += 1;
+                Ok(())
+            }
+            Some(c) => Err(CssError::ParseError(format!(
+                "Expected '{}', found '{}'",
+                expected, c
+            ))),
+            None => Err(CssError::UnexpectedEof),
+        }
+    }
+
+    fn is_eof(&self) -> bool {
+        self.pos >= self.chars.len()
+    }
+}
+
+fn is_ident_start(c: char) -> bool {
+    c.is_ascii_alphabetic() || c == '_' || c == '-'
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_' || c == '-'
+}
+
+/// Convenience function to parse a CSS string into a `StyleSheet`.
+pub fn parse_stylesheet(css: &str) -> Result<StyleSheet, CssError> {
+    let mut parser = CssParser::new(css);
+    parser.parse_stylesheet()
+}
