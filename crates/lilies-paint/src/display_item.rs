@@ -14,6 +14,13 @@ pub enum DisplayItem {
         widths: EdgeSizes,
         color: Color,
     },
+    /// A single line of text with position and styling.
+    Text {
+        text: String,
+        rect: Rect,
+        color: Color,
+        font_size: f32,
+    },
 }
 
 /// An ordered list of display items to be rasterized to a 2D framebuffer.

@@ -1,6 +1,7 @@
 #![deny(unsafe_code)]
 
 use crate::box_model::Dimensions;
+use crate::font::TextLine;
 use lilies_css::{ComputedStyle, LengthOrAuto};
 use lilies_dom::NodeId;
 
@@ -44,6 +45,8 @@ pub struct LayoutBox {
     pub box_type: BoxType,
     pub children: Vec<LayoutBox>,
     pub style: Option<ComputedStyle>,
+    pub text: Option<String>,
+    pub lines: Vec<TextLine>,
 }
 
 impl Default for LayoutBox {
@@ -53,6 +56,8 @@ impl Default for LayoutBox {
             box_type: BoxType::AnonymousBlock,
             children: Vec::new(),
             style: None,
+            text: None,
+            lines: Vec::new(),
         }
     }
 }
@@ -65,7 +70,15 @@ impl LayoutBox {
             box_type,
             children: Vec::new(),
             style: None,
+            text: None,
+            lines: Vec::new(),
         }
+    }
+
+    /// Sets the text content for this layout box.
+    pub fn with_text(mut self, text: String) -> Self {
+        self.text = Some(text);
+        self
     }
 
     /// Sets the computed style for this layout box.
@@ -332,8 +345,46 @@ impl LayoutBox {
             + self.dimensions.border.top
             + self.dimensions.padding.top;
 
-        for child in &mut self.children {
-            child.layout(self.dimensions);
+        if let Some(ref text) = self.text {
+            let font_size = self.style.as_ref().map_or(16.0, |s| s.font_size);
+            let available_width = if self.dimensions.content.width > 0.0 {
+                self.dimensions.content.width
+            } else {
+                containing_block.content.width
+            };
+            self.lines = crate::font::wrap_text(
+                text,
+                font_size,
+                available_width,
+                self.dimensions.content.x,
+                self.dimensions.content.y,
+            );
+            if !self.lines.is_empty() {
+                let line_h = crate::font::line_height(font_size);
+                self.dimensions.content.height = self.lines.len() as f32 * line_h;
+                let max_w = self
+                    .lines
+                    .iter()
+                    .map(|l| l.rect.width)
+                    .fold(0.0f32, f32::max);
+                self.dimensions.content.width = max_w;
+            }
+        }
+
+        if !self.children.is_empty() {
+            let mut total_h = 0.0f32;
+            let mut max_w = 0.0f32;
+            for child in &mut self.children {
+                child.layout(self.dimensions);
+                total_h += child.dimensions.margin_box().height;
+                max_w = max_w.max(child.dimensions.margin_box().width);
+            }
+            if self.dimensions.content.height == 0.0 {
+                self.dimensions.content.height = total_h;
+            }
+            if self.dimensions.content.width == 0.0 {
+                self.dimensions.content.width = max_w;
+            }
         }
     }
 }

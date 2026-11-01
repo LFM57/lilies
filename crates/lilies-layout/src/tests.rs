@@ -540,3 +540,120 @@ fn test_doctype_and_comments_no_box() {
     assert!(build_layout_tree(doctype, doc.arena(), &style_tree).is_none());
     assert!(build_layout_tree(comment, doc.arena(), &style_tree).is_none());
 }
+
+#[test]
+fn test_font_text_measurement() {
+    use crate::font::{font_ascent, line_height, measure_char, measure_text};
+
+    let w_a = measure_char('a', 16.0);
+    let w_m = measure_char('m', 16.0);
+    let w_space = measure_char(' ', 16.0);
+
+    assert!(w_a > 0.0);
+    assert!(w_m > w_a);
+    assert!(w_space > 0.0);
+
+    let text_16 = "lilies browser";
+    let width_16 = measure_text(text_16, 16.0);
+    let width_32 = measure_text(text_16, 32.0);
+
+    assert!(width_16 > 0.0);
+    // At double font size, horizontal advance should roughly double
+    assert!((width_32 - (width_16 * 2.0)).abs() < 5.0);
+
+    assert_eq!(line_height(16.0), 19.2);
+    assert_eq!(line_height(32.0), 38.4);
+    assert!(font_ascent(16.0) > 0.0);
+}
+
+#[test]
+fn test_word_wrapping_width_boundaries() {
+    use crate::font::{measure_char, measure_text, wrap_text};
+
+    let text = "apple banana cherry date";
+    let font_size = 16.0;
+
+    // 1. Unconstrained: all words fit on one line
+    let lines_unconstrained = wrap_text(text, font_size, 1000.0, 10.0, 20.0);
+    assert_eq!(lines_unconstrained.len(), 1);
+    assert_eq!(lines_unconstrained[0].text, "apple banana cherry date");
+    assert_eq!(lines_unconstrained[0].rect.x, 10.0);
+    assert_eq!(lines_unconstrained[0].rect.y, 20.0);
+
+    // 2. Exact boundary between 2 words and 3 words:
+    let w_apple = measure_text("apple", font_size);
+    let w_banana = measure_text("banana", font_size);
+    let w_cherry = measure_text("cherry", font_size);
+    let w_space = measure_char(' ', font_size);
+
+    let two_words_width = w_apple + w_space + w_banana;
+    let three_words_width = two_words_width + w_space + w_cherry;
+
+    // Boundary: exactly fits two words
+    let lines_two = wrap_text(text, font_size, two_words_width + 0.1, 0.0, 0.0);
+    assert_eq!(lines_two[0].text, "apple banana");
+
+    // Just smaller than two words: apple wraps banana to line 2
+    let lines_tight = wrap_text(text, font_size, two_words_width - 1.0, 0.0, 0.0);
+    assert_eq!(lines_tight[0].text, "apple");
+    assert_eq!(lines_tight[1].text, "banana");
+
+    // Fits 3 words
+    let lines_three = wrap_text(text, font_size, three_words_width + 0.1, 0.0, 0.0);
+    assert_eq!(lines_three[0].text, "apple banana cherry");
+    assert_eq!(lines_three[1].text, "date");
+
+    // 3. Single oversized word: does not crash or loop infinitely
+    let long_word = "supercalifragilisticexpialidocious";
+    let lines_long = wrap_text(long_word, font_size, 50.0, 0.0, 0.0);
+    assert_eq!(lines_long.len(), 1);
+    assert_eq!(lines_long[0].text, long_word);
+
+    // 4. Empty and whitespace-only text
+    assert!(wrap_text("", font_size, 200.0, 0.0, 0.0).is_empty());
+    assert!(wrap_text("   \n\t  ", font_size, 200.0, 0.0, 0.0).is_empty());
+}
+
+#[test]
+fn test_text_node_layout_and_height_calculation() {
+    let html = r#"<html><body><div style="width: 200px;"><p>One two three four five six seven eight nine ten eleven twelve</p></div></body></html>"#;
+    let doc = parse_html(html);
+    let stylesheet = lilies_css::StyleSheet::new();
+    let styles = compute_styles(&doc, &stylesheet);
+
+    let html_id = doc
+        .get_children(doc.root())
+        .into_iter()
+        .find(|&id| {
+            doc.node(id)
+                .and_then(|n| n.as_element())
+                .is_some_and(|el| el.tag_name() == "html")
+        })
+        .expect("html element");
+
+    let mut root_box = build_layout_tree(html_id, doc.arena(), &styles).unwrap();
+    let viewport = Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0));
+    layout(&mut root_box, viewport);
+
+    let body = &root_box.children[0];
+    let div = &body.children[0];
+    let p = &div.children[0];
+    let text_box = &p.children[0];
+
+    assert!(!text_box.lines.is_empty());
+    assert!(text_box.lines.len() >= 2);
+
+    let expected_height = text_box.lines.len() as f32 * (16.0 * 1.2);
+    assert_eq!(text_box.dimensions.content.height, expected_height);
+    assert_eq!(p.dimensions.content.height, expected_height);
+    assert_eq!(div.dimensions.content.height, expected_height);
+
+    // Check line positioning is monotonically increasing in y
+    for i in 1..text_box.lines.len() {
+        assert!(text_box.lines[i].rect.y > text_box.lines[i - 1].rect.y);
+        assert_eq!(
+            text_box.lines[i].rect.y,
+            text_box.lines[i - 1].rect.y + (16.0 * 1.2)
+        );
+    }
+}

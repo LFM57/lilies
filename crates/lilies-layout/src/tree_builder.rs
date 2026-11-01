@@ -56,8 +56,22 @@ pub fn build_layout_tree(
             if text.data.trim().is_empty() {
                 return None;
             }
-            let style = style_tree.get(node_id).cloned();
-            (BoxType::InlineNode(node_id), style)
+            let parent_style = node.parent.and_then(|p| style_tree.get(p));
+            let style = style_tree
+                .get(node_id)
+                .cloned()
+                .or_else(|| {
+                    parent_style.cloned().map(|mut s| {
+                        s.display = Display::Inline;
+                        s
+                    })
+                })
+                .or_else(|| Some(ComputedStyle::default()));
+
+            let mut text_box = LayoutBox::new(BoxType::InlineNode(node_id));
+            text_box.style = style;
+            text_box.text = Some(text.data.clone());
+            return Some(text_box);
         }
 
         NodeType::Comment(_) | NodeType::DocumentType(_) => {

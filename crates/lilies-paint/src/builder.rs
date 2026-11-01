@@ -19,6 +19,7 @@ pub fn build_display_list(layout_root: &LayoutBox) -> DisplayList {
 fn render_layout_box(layout_box: &LayoutBox, list: &mut DisplayList) {
     render_background(layout_box, list);
     render_borders(layout_box, list);
+    render_text(layout_box, list);
 
     for child in &layout_box.children {
         render_layout_box(child, list);
@@ -49,6 +50,26 @@ fn render_borders(layout_box: &LayoutBox, list: &mut DisplayList) {
                 rect: border_box,
                 widths: border,
                 color,
+            });
+        }
+    }
+}
+
+fn render_text(layout_box: &LayoutBox, list: &mut DisplayList) {
+    if layout_box.lines.is_empty() {
+        return;
+    }
+
+    let color = layout_box.get_style().map_or(Color::BLACK, |s| s.color);
+    let font_size = layout_box.get_style().map_or(16.0, |s| s.font_size);
+
+    for line in &layout_box.lines {
+        if line.rect.width > 0.0 && line.rect.height > 0.0 && !line.text.is_empty() {
+            list.push(DisplayItem::Text {
+                text: line.text.clone(),
+                rect: line.rect,
+                color,
+                font_size,
             });
         }
     }

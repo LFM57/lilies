@@ -53,6 +53,7 @@ pub struct ComputedStyle {
     pub padding_left: f32,
     pub background_color: Color,
     pub color: Color,
+    pub font_size: f32,
 }
 
 impl Default for ComputedStyle {
@@ -71,6 +72,7 @@ impl Default for ComputedStyle {
             padding_left: 0.0,
             background_color: Color::TRANSPARENT,
             color: Color::BLACK,
+            font_size: 16.0,
         }
     }
 }
@@ -78,7 +80,8 @@ impl Default for ComputedStyle {
 impl ComputedStyle {
     /// Returns default initial style based on the HTML element tag.
     pub fn default_for_tag(tag_name: &str) -> Self {
-        let display = match tag_name.to_ascii_lowercase().as_str() {
+        let tag = tag_name.to_ascii_lowercase();
+        let display = match tag.as_str() {
             "html" | "body" | "div" | "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "ul"
             | "ol" | "li" | "section" | "header" | "footer" | "article" | "nav" | "main"
             | "blockquote" | "form" | "hr" | "table" => Display::Block,
@@ -86,8 +89,19 @@ impl ComputedStyle {
             _ => Display::Inline,
         };
 
+        let font_size = match tag.as_str() {
+            "h1" => 32.0,
+            "h2" => 24.0,
+            "h3" => 20.0,
+            "h4" => 16.0,
+            "h5" => 14.0,
+            "h6" => 12.0,
+            _ => 16.0,
+        };
+
         Self {
             display,
+            font_size,
             ..Default::default()
         }
     }
@@ -124,6 +138,12 @@ impl ComputedStyle {
             "color" => {
                 if let Some(c) = val.to_color() {
                     self.color = c;
+                }
+            }
+
+            "font-size" => {
+                if let Some(p) = parse_length(val) {
+                    self.font_size = p;
                 }
             }
 
@@ -344,10 +364,15 @@ fn compute_node(
 
     if let Some(element) = node.as_element() {
         let mut style = ComputedStyle::default_for_tag(element.tag_name());
+        let tag = element.tag_name().to_ascii_lowercase();
+        let is_heading = matches!(tag.as_str(), "h1" | "h2" | "h3" | "h4" | "h5" | "h6");
 
         // Apply inheritable properties from parent
         if let Some(parent) = parent_style {
             style.color = parent.color;
+            if !is_heading {
+                style.font_size = parent.font_size;
+            }
         }
 
         // Find all matching rules and collect declarations with their specificity and rule order
@@ -392,6 +417,16 @@ fn compute_node(
         }
     } else {
         // Document node, text node, comment, or doctype
+        if node.as_text().is_some() {
+            let text_style = ComputedStyle {
+                display: Display::Inline,
+                font_size: parent_style.map_or(16.0, |p| p.font_size),
+                color: parent_style.map_or(Color::BLACK, |p| p.color),
+                ..Default::default()
+            };
+            style_tree.insert(node_id, text_style);
+        }
+
         for child_id in doc.get_children(node_id) {
             compute_node(child_id, parent_style, doc, stylesheet, style_tree);
         }

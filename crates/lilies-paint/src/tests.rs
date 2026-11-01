@@ -317,3 +317,144 @@ fn test_full_pipeline_html_to_display_list_to_pixmap() {
     // Outside card: (50, 50) -> #ffffff
     assert_eq!(pixmap.get_pixel(50, 50), Some(Color::WHITE));
 }
+
+#[test]
+fn test_glyph_rasterization_basic() {
+    let mut pixmap = Pixmap::new(200, 60, Color::WHITE);
+    let mut display_list = DisplayList::new();
+    display_list.push(DisplayItem::Text {
+        text: "lilies".to_string(),
+        rect: Rect::new(10.0, 10.0, 100.0, 30.0),
+        color: Color::BLACK,
+        font_size: 24.0,
+    });
+
+    rasterize(&display_list, &mut pixmap);
+
+    // Verify some non-white pixels were drawn for the text glyphs
+    let black_or_gray_pixels = (0..60)
+        .flat_map(|y| (0..200).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let p = pixmap.get_pixel(x, y).unwrap();
+            p != Color::WHITE
+        })
+        .count();
+
+    assert!(
+        black_or_gray_pixels > 50,
+        "Expected at least 50 rasterized text pixels, found {}",
+        black_or_gray_pixels
+    );
+}
+
+#[test]
+fn test_glyph_rasterization_alpha_blending() {
+    let mut pixmap = Pixmap::new(100, 50, Color::rgb(0, 0, 255)); // Blue background
+    let mut display_list = DisplayList::new();
+
+    // Semi-transparent red text (50% alpha)
+    display_list.push(DisplayItem::Text {
+        text: "H".to_string(),
+        rect: Rect::new(10.0, 10.0, 50.0, 30.0),
+        color: Color::rgba(255, 0, 0, 128),
+        font_size: 24.0,
+    });
+
+    rasterize(&display_list, &mut pixmap);
+
+    // Find glyph pixels that have blended red and blue
+    let blended_pixels = (0..50)
+        .flat_map(|y| (0..100).map(move |x| (x, y)))
+        .filter(|&(x, y)| {
+            let p = pixmap.get_pixel(x, y).unwrap();
+            // Blended pixel should have both Red > 0 and Blue > 0
+            p.r > 0 && p.b > 0
+        })
+        .count();
+
+    assert!(
+        blended_pixels > 10,
+        "Expected blended glyph pixels with both R and B, found {}",
+        blended_pixels
+    );
+}
+
+#[test]
+fn test_rasterization_out_of_bounds_clipping() {
+    let mut pixmap = Pixmap::new(50, 50, Color::WHITE);
+    let mut display_list = DisplayList::new();
+
+    // Draw off-screen left and top
+    display_list.push(DisplayItem::Text {
+        text: "Negative Offset".to_string(),
+        rect: Rect::new(-50.0, -20.0, 100.0, 30.0),
+        color: Color::BLACK,
+        font_size: 16.0,
+    });
+
+    // Draw off-screen right and bottom
+    display_list.push(DisplayItem::Text {
+        text: "Far Away".to_string(),
+        rect: Rect::new(1000.0, 1000.0, 100.0, 30.0),
+        color: Color::BLACK,
+        font_size: 16.0,
+    });
+
+    // Draw spanning across the border edge
+    display_list.push(DisplayItem::Text {
+        text: "Crossing Viewport Edge".to_string(),
+        rect: Rect::new(30.0, 30.0, 200.0, 30.0),
+        color: Color::BLACK,
+        font_size: 16.0,
+    });
+
+    // Must not panic or segfault or corrupt memory
+    rasterize(&display_list, &mut pixmap);
+
+    // Empty pixmap should also not panic
+    let mut empty_pixmap = Pixmap::new(0, 0, Color::WHITE);
+    rasterize(&display_list, &mut empty_pixmap);
+}
+
+#[test]
+fn test_display_list_text_generation() {
+    use lilies_layout::TextLine;
+
+    let mut text_box = LayoutBox::new(BoxType::InlineNode(NodeId(5)));
+    text_box.style = Some(ComputedStyle {
+        color: Color::rgb(137, 180, 250),
+        font_size: 32.0,
+        ..Default::default()
+    });
+    text_box.lines = vec![
+        TextLine {
+            text: "Line 1".to_string(),
+            rect: Rect::new(10.0, 10.0, 80.0, 38.4),
+        },
+        TextLine {
+            text: "Line 2".to_string(),
+            rect: Rect::new(10.0, 48.4, 80.0, 38.4),
+        },
+    ];
+
+    let display_list = build_display_list(&text_box);
+    assert_eq!(display_list.len(), 2);
+    assert_eq!(
+        display_list.items[0],
+        DisplayItem::Text {
+            text: "Line 1".to_string(),
+            rect: Rect::new(10.0, 10.0, 80.0, 38.4),
+            color: Color::rgb(137, 180, 250),
+            font_size: 32.0,
+        }
+    );
+    assert_eq!(
+        display_list.items[1],
+        DisplayItem::Text {
+            text: "Line 2".to_string(),
+            rect: Rect::new(10.0, 48.4, 80.0, 38.4),
+            color: Color::rgb(137, 180, 250),
+            font_size: 32.0,
+        }
+    );
+}

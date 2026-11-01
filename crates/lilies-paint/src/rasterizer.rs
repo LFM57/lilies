@@ -225,6 +225,70 @@ fn draw_border(pixmap: &mut Pixmap, rect: Rect, widths: EdgeSizes, color: Color)
     }
 }
 
+/// Renders a single line of text onto the pixmap using fontdue and alpha blending.
+fn draw_text(pixmap: &mut Pixmap, text: &str, rect: Rect, color: Color, font_size: f32) {
+    if text.is_empty() || color.a == 0 || font_size <= 0.0 {
+        return;
+    }
+
+    let font = lilies_layout::font::default_font();
+    let ascent = lilies_layout::font::font_ascent(font_size);
+    let baseline_y = rect.y + ascent;
+    let mut cursor_x = rect.x;
+    let pw = pixmap.width as usize;
+
+    for c in text.chars() {
+        let (metrics, bitmap) = font.rasterize(c, font_size);
+        if metrics.width > 0 && metrics.height > 0 {
+            let glyph_x = cursor_x + metrics.xmin as f32;
+            let glyph_top_y = baseline_y - (metrics.ymin as f32 + metrics.height as f32);
+
+            let gx0 = glyph_x.round() as i64;
+            let gy0 = glyph_top_y.round() as i64;
+
+            for row in 0..metrics.height {
+                let py = gy0 + row as i64;
+                if py < 0 || py >= pixmap.height as i64 {
+                    continue;
+                }
+
+                let row_offset = row * metrics.width;
+                for col in 0..metrics.width {
+                    let px = gx0 + col as i64;
+                    if px < 0 || px >= pixmap.width as i64 {
+                        continue;
+                    }
+
+                    let coverage = bitmap[row_offset + col];
+                    if coverage == 0 {
+                        continue;
+                    }
+
+                    let alpha = ((color.a as u32 * coverage as u32) / 255) as u8;
+                    if alpha == 0 {
+                        continue;
+                    }
+
+                    let glyph_pixel = Color::rgba(color.r, color.g, color.b, alpha);
+                    let idx = (py as usize * pw + px as usize) * 4;
+                    let dest = Color::rgba(
+                        pixmap.pixels[idx],
+                        pixmap.pixels[idx + 1],
+                        pixmap.pixels[idx + 2],
+                        pixmap.pixels[idx + 3],
+                    );
+                    let blended = blend_pixel(glyph_pixel, dest);
+                    pixmap.pixels[idx] = blended.r;
+                    pixmap.pixels[idx + 1] = blended.g;
+                    pixmap.pixels[idx + 2] = blended.b;
+                    pixmap.pixels[idx + 3] = blended.a;
+                }
+            }
+        }
+        cursor_x += metrics.advance_width;
+    }
+}
+
 /// Rasterizes a display list onto the target pixmap.
 pub fn rasterize(display_list: &DisplayList, pixmap: &mut Pixmap) {
     for item in display_list {
@@ -238,6 +302,14 @@ pub fn rasterize(display_list: &DisplayList, pixmap: &mut Pixmap) {
                 color,
             } => {
                 draw_border(pixmap, *rect, *widths, *color);
+            }
+            DisplayItem::Text {
+                text,
+                rect,
+                color,
+                font_size,
+            } => {
+                draw_text(pixmap, text, *rect, *color, *font_size);
             }
         }
     }

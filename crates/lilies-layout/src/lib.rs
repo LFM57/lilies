@@ -2,11 +2,13 @@
 
 pub mod box_model;
 pub mod error;
+pub mod font;
 pub mod layout_box;
 pub mod tree_builder;
 
 pub use box_model::{Dimensions, EdgeSizes, Rect};
 pub use error::LayoutError;
+pub use font::{default_font, wrap_text, TextLine};
 pub use layout_box::{BoxType, LayoutBox};
 pub use tree_builder::build_layout_tree;
 

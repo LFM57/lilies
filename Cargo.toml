@@ -18,6 +18,7 @@ license = "MIT OR Apache-2.0"
 [workspace.dependencies]
 thiserror = "2.0"
 indexmap = "2.7"
+fontdue = "0.9"
 lilies-dom = { path = "crates/lilies-dom" }
 lilies-html = { path = "crates/lilies-html" }
 lilies-css = { path = "crates/lilies-css" }
