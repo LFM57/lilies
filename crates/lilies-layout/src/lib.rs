@@ -1,37 +1,21 @@
 #![deny(unsafe_code)]
 
-use lilies_dom::NodeId;
-use thiserror::Error;
+pub mod box_model;
+pub mod error;
+pub mod layout_box;
+pub mod tree_builder;
 
-#[derive(Debug, Error, PartialEq, Eq)]
-pub enum LayoutError {
-    #[error("Layout error: {0}")]
-    Generic(String),
+pub use box_model::{Dimensions, EdgeSizes, Rect};
+pub use error::LayoutError;
+pub use layout_box::{BoxType, LayoutBox};
+pub use tree_builder::build_layout_tree;
+
+/// Calculates the layout of a root box within the given initial viewport dimensions.
+pub fn layout(root_box: &mut LayoutBox, viewport: Dimensions) {
+    let mut initial_cb = viewport;
+    initial_cb.content.height = 0.0;
+    root_box.layout(initial_cb);
 }
 
-/// Represents physical box dimensions in 2D space.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub struct Rect {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-/// A node in the layout tree.
-#[derive(Debug, Clone, PartialEq)]
-pub struct LayoutBox {
-    pub node_id: Option<NodeId>,
-    pub dimensions: Rect,
-    pub children: Vec<LayoutBox>,
-}
-
-impl LayoutBox {
-    pub fn new(node_id: Option<NodeId>) -> Self {
-        Self {
-            node_id,
-            dimensions: Rect::default(),
-            children: Vec::new(),
-        }
-    }
-}
+#[cfg(test)]
+mod tests;

@@ -8,3 +8,6 @@ license.workspace = true
 lilies-dom.workspace = true
 lilies-css.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+lilies-html.workspace = true
