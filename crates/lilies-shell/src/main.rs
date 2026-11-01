@@ -1,8 +1,18 @@
 #![deny(unsafe_code)]
 
-use lilies_css::{compute_styles, parse_stylesheet};
+use lilies_css::{compute_styles, StyleSheet};
 use lilies_html::parse_html;
 use lilies_layout::{build_layout_tree, layout, BoxType, Dimensions, LayoutBox, Rect};
+use lilies_paint::{build_display_list, rasterize, Color, DisplayItem, Pixmap};
+use std::time::Instant;
+
+fn count_layout_nodes(layout_box: &LayoutBox) -> usize {
+    1 + layout_box
+        .children
+        .iter()
+        .map(count_layout_nodes)
+        .sum::<usize>()
+}
 
 fn print_layout_tree(layout_box: &LayoutBox, indent: usize) {
     let pad = "  ".repeat(indent);
@@ -24,90 +34,118 @@ fn print_layout_tree(layout_box: &LayoutBox, indent: usize) {
 }
 
 fn main() {
-    println!("=== lilies: Modern Browser Engine (Milestones 1, 2 & 3) ===");
+    println!("=== lilies: Modern Browser Engine (Milestones 1, 2, 3 & 4) ===");
 
-    let html_input = r#"<!DOCTYPE html>
-<html>
-  <body>
-    <div id="main" class="box">
-      <span class="highlight">hello lilies</span>
+    let html_input = r#"<html>
+  <body style="background-color: #ffffff;">
+    <div class="card" style="background-color: #2b3a4a; width: 400px; height: 300px; margin: 50px auto;">
+      <div class="inner" style="background-color: #ff5722; width: 200px; height: 100px; margin: 20px;"></div>
     </div>
   </body>
 </html>"#;
 
-    let css_input = r#"
-      div {
-        display: block;
-        margin: 10px;
-        color: red;
-      }
-      .box {
-        width: 200px;
-        background-color: #f0f0f0;
-      }
-      #main {
-        padding: 15px;
-      }
-      .highlight {
-        color: blue;
-      }
-    "#;
-
-    println!("\n--- 1. Input HTML ---");
+    println!("\n--- 1. Input HTML Document ---");
     println!("{}", html_input);
 
+    let start_total = Instant::now();
+
+    // Step 1: HTML Parsing
+    let t0 = Instant::now();
     let doc = parse_html(html_input);
-
-    println!("\n--- 2. Parsed DOM Tree ---");
-    println!("{}", doc.dump_document());
-
-    println!("\n--- 3. Input CSS ---");
-    println!("{}", css_input.trim());
-
-    let stylesheet = parse_stylesheet(css_input).expect("Failed to parse CSS");
+    let html_dur = t0.elapsed();
     println!(
-        "\n--- 4. Parsed Stylesheet ({} rules) ---",
-        stylesheet.rules.len()
+        "\n[1/5] HTML Parsed: {} DOM nodes (took {:?})",
+        doc.arena().len(),
+        html_dur
     );
 
+    // Step 2: CSS & Style Computation
+    let t1 = Instant::now();
+    let stylesheet = StyleSheet::new();
     let styles = compute_styles(&doc, &stylesheet);
-    println!("\n--- 5. Computed Styles Tree ---");
-    for (node_id, style) in styles.iter() {
-        if let Some(node) = doc.node(*node_id) {
-            if let Some(el) = node.as_element() {
+    let css_dur = t1.elapsed();
+    println!(
+        "[2/5] Styles Computed: {} styled elements (took {:?})",
+        styles.len(),
+        css_dur
+    );
+
+    // Step 3: Layout Tree Construction & Block Layout
+    let t2 = Instant::now();
+    let html_id = doc
+        .get_children(doc.root())
+        .into_iter()
+        .find(|&id| {
+            doc.node(id)
+                .and_then(|n| n.as_element())
+                .is_some_and(|el| el.tag_name() == "html")
+        })
+        .expect("html element required");
+
+    let mut root_box =
+        build_layout_tree(html_id, doc.arena(), &styles).expect("Failed to build layout tree");
+    let viewport = Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0));
+    layout(&mut root_box, viewport);
+    let layout_dur = t2.elapsed();
+    let layout_nodes = count_layout_nodes(&root_box);
+    println!(
+        "[3/5] Layout Computed: {} layout boxes, viewport 800x600 (took {:?})",
+        layout_nodes, layout_dur
+    );
+
+    println!("\n--- Layout Tree ---");
+    print_layout_tree(&root_box, 0);
+
+    // Step 4: Display List Construction
+    let t3 = Instant::now();
+    let display_list = build_display_list(&root_box);
+    let paint_dur = t3.elapsed();
+    println!(
+        "\n[4/5] Display List Built: {} display items (took {:?})",
+        display_list.len(),
+        paint_dur
+    );
+    for (i, item) in display_list.iter().enumerate() {
+        match item {
+            DisplayItem::SolidColor { rect, color } => {
                 println!(
-                    "  {} <{}>: display={:?}, color={}, bg={}, width={:?}, margin={:?}, padding={}",
-                    node_id,
-                    el.tag_name(),
-                    style.display,
-                    style.color,
-                    style.background_color,
-                    style.width,
-                    style.margin_top,
-                    style.padding_top,
+                    "  [{}] SolidColor: ({:.1}, {:.1}, {:.1}x{:.1}) color={}",
+                    i, rect.x, rect.y, rect.width, rect.height, color
+                );
+            }
+            DisplayItem::Border {
+                rect,
+                widths,
+                color,
+            } => {
+                println!(
+                    "  [{}] Border: ({:.1}, {:.1}, {:.1}x{:.1}) widths=[{:.1}, {:.1}, {:.1}, {:.1}] color={}",
+                    i, rect.x, rect.y, rect.width, rect.height, widths.top, widths.right, widths.bottom, widths.left, color
                 );
             }
         }
     }
 
-    let html_id = doc.get_children(doc.root()).into_iter().find(|&id| {
-        doc.node(id)
-            .and_then(|n| n.as_element())
-            .is_some_and(|el| el.tag_name() == "html")
-    });
+    // Step 5: Rasterization & Output
+    let t4 = Instant::now();
+    let mut pixmap = Pixmap::new(800, 600, Color::WHITE);
+    rasterize(&display_list, &mut pixmap);
+    let output_file = "output.ppm";
+    pixmap
+        .save_ppm(output_file)
+        .expect("Failed to save output PPM");
+    let raster_dur = t4.elapsed();
+    println!(
+        "[5/5] Rasterized & Exported: saved to '{}' (took {:?})",
+        output_file, raster_dur
+    );
 
-    if let Some(html_id) = html_id {
-        if let Some(mut root_box) = build_layout_tree(html_id, doc.arena(), &styles) {
-            let viewport = Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0));
-            layout(&mut root_box, viewport);
-            println!("\n--- 6. Computed Layout Tree ---");
-            print_layout_tree(&root_box, 0);
-        }
-    }
+    let total_dur = start_total.elapsed();
+    println!("\nComplete Render Pipeline Finished in {:?}", total_dur);
 
     println!("\nPipeline Status:");
     println!("  [x] HTML Tokenizer & Tree Builder (crates/lilies-html - Milestone 1)");
     println!("  [x] CSS Parser & Computed Styles (crates/lilies-css - Milestone 2)");
     println!("  [x] Layout Engine (crates/lilies-layout - Milestone 3)");
-    println!("  [ ] Display List & 2D Painter (crates/lilies-paint - Milestone 4)");
+    println!("  [x] Display List & 2D Painter (crates/lilies-paint - Milestone 4)");
 }

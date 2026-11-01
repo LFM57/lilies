@@ -13,7 +13,7 @@ pub use color::Color;
 pub use computed::{compute_styles, ComputedStyle, Display, LengthOrAuto, StyleTree};
 pub use error::CssError;
 pub use matcher::{matches, matches_document};
-pub use parser::{parse_stylesheet, CssParser};
+pub use parser::{parse_declarations, parse_stylesheet, CssParser};
 pub use specificity::Specificity;
 
 #[cfg(test)]

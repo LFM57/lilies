@@ -6,4 +6,9 @@ license.workspace = true
 
 [dependencies]
 lilies-layout.workspace = true
+lilies-css.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+lilies-dom.workspace = true
+lilies-html.workspace = true

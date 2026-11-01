@@ -375,6 +375,15 @@ fn compute_node(
             style.apply_declaration(decl);
         }
 
+        // Apply inline style attribute with highest priority
+        if let Some(style_attr) = element.get_attribute("style") {
+            if let Ok(inline_decls) = crate::parser::parse_declarations(style_attr) {
+                for decl in &inline_decls {
+                    style.apply_declaration(decl);
+                }
+            }
+        }
+
         style_tree.insert(node_id, style.clone());
 
         // Recurse for all children

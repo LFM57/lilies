@@ -228,3 +228,34 @@ fn test_specificity_and_source_order_cascade() {
     let styles2 = compute_styles(&doc, &sheet2);
     assert_eq!(styles2.get(div).unwrap().color, Color::GREEN);
 }
+
+#[test]
+fn test_inline_style_attribute_overrides() {
+    let mut doc = Document::new();
+    let root = doc.root();
+
+    let mut attrs = IndexMap::new();
+    attrs.insert("class".to_string(), "card".to_string());
+    attrs.insert(
+        "style".to_string(),
+        "background-color: #ff5722; width: 200px; height: 100px; margin: 20px;".to_string(),
+    );
+    let div = doc.create_element("div", attrs);
+    doc.append_child(root, div).unwrap();
+
+    let css = r#"
+        .card {
+            background-color: #2b3a4a;
+            width: 400px;
+        }
+    "#;
+    let stylesheet = parse_stylesheet(css).unwrap();
+    let styles = compute_styles(&doc, &stylesheet);
+    let div_style = styles.get(div).unwrap();
+
+    // Inline style overrides stylesheet rule
+    assert_eq!(div_style.background_color, Color::rgb(255, 87, 34));
+    assert_eq!(div_style.width, LengthOrAuto::Px(200.0));
+    assert_eq!(div_style.height, LengthOrAuto::Px(100.0));
+    assert_eq!(div_style.margin_top, LengthOrAuto::Px(20.0));
+}

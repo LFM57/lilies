@@ -35,6 +35,32 @@ impl CssParser {
         Ok(stylesheet)
     }
 
+    /// Parses a sequence of semicolon-separated declarations (e.g. from an HTML `style` attribute).
+    pub fn parse_declarations(&mut self) -> Result<Vec<Declaration>, CssError> {
+        let mut declarations = Vec::new();
+        loop {
+            self.skip_whitespace_and_comments();
+            if self.is_eof() {
+                break;
+            }
+
+            let declaration = self.parse_declaration()?;
+            declarations.push(declaration);
+
+            self.skip_whitespace_and_comments();
+            if self.peek() == Some(';') {
+                self.pos += 1;
+            } else if self.is_eof() {
+                break;
+            } else {
+                return Err(CssError::ParseError(
+                    "Expected ';' or EOF after declaration".into(),
+                ));
+            }
+        }
+        Ok(declarations)
+    }
+
     /// Parses a single rule: `selectors { declarations }`.
     fn parse_rule(&mut self) -> Result<Rule, CssError> {
         let selectors = self.parse_selectors()?;
@@ -442,4 +468,10 @@ fn is_ident_char(c: char) -> bool {
 pub fn parse_stylesheet(css: &str) -> Result<StyleSheet, CssError> {
     let mut parser = CssParser::new(css);
     parser.parse_stylesheet()
+}
+
+/// Convenience function to parse semicolon-separated CSS declarations (e.g. from an HTML `style` attribute).
+pub fn parse_declarations(css: &str) -> Result<Vec<Declaration>, CssError> {
+    let mut parser = CssParser::new(css);
+    parser.parse_declarations()
 }
