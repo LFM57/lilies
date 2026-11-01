@@ -2,7 +2,7 @@
 
 # 🪷 lilies
 
-**Lightweight Inline Layout and Interface Engine System**
+**L**ightweight **I**nline **L**ayout and **I**nterface **E**ngine **S**ystem
 
 *An independent, modular web browser rendering engine and interactive desktop browser written from scratch in pure, 100% safe Rust.*
 
