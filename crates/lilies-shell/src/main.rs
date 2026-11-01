@@ -3,6 +3,7 @@
 use lilies_css::StyleTree;
 use lilies_dom::{Document, NodeId};
 use lilies_html::{load_styles_with_external, parse_html};
+use lilies_js::JsRuntime;
 use lilies_layout::{
     build_layout_tree_with_cache, find_parent_link, hit_test, layout, Dimensions, EdgeSizes,
     LayoutBox, Rect,
@@ -70,6 +71,30 @@ pub const FLEX_DEMO_HTML: &str = r#"<html>
         <p style="color: #94a3b8; font-size: 14px;">Second flex item.</p>
       </div>
     </div>
+  </body>
+</html>"#;
+
+pub const JS_DEMO_HTML: &str = r#"<html>
+  <body style="background-color: #0f172a; color: #f8fafc; font-family: sans-serif; padding: 40px; text-align: center;">
+    <h1 id="heading" style="color: #38bdf8; font-size: 32px;">Static Heading</h1>
+    <p id="counter-text" style="color: #94a3b8; font-size: 18px; margin: 20px auto;">Count: 0</p>
+    <button id="btn" style="background-color: #3b82f6; color: white; padding: 12px 24px; font-size: 16px; border: none; cursor: pointer;">
+      Click Me!
+    </button>
+    <script>
+      console.log("Hello from lilies JavaScript runtime!");
+      var heading = document.getElementById("heading");
+      heading.textContent = "Dynamic Heading (Set by JS)";
+
+      var count = 0;
+      var btn = document.getElementById("btn");
+      var counter = document.getElementById("counter-text");
+      btn.addEventListener("click", function() {
+        count = count + 1;
+        counter.textContent = "Count: " + count;
+        console.log("Button clicked! New count: " + count);
+      });
+    </script>
   </body>
 </html>"#;
 
@@ -431,6 +456,72 @@ pub fn load_images_for_document(doc: &Document, base_url: &str, cache: &ImageCac
     }
 }
 
+/// Source of JavaScript execution in an HTML document.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScriptSource {
+    Inline(String),
+    External(String),
+}
+
+/// Finds all `<script>` elements in the document in document order.
+pub fn find_script_elements(doc: &Document) -> Vec<ScriptSource> {
+    let mut scripts = Vec::new();
+    collect_script_elements(doc, doc.root(), &mut scripts);
+    scripts
+}
+
+fn collect_script_elements(doc: &Document, node_id: NodeId, scripts: &mut Vec<ScriptSource>) {
+    if let Some(node) = doc.node(node_id) {
+        if let Some(el) = node.as_element() {
+            if el.tag_name().eq_ignore_ascii_case("script") {
+                if let Some(src) = el.get_attribute("src") {
+                    let trimmed = src.trim();
+                    if !trimmed.is_empty() {
+                        scripts.push(ScriptSource::External(trimmed.to_string()));
+                        return;
+                    }
+                }
+                let text = doc.text_content(node_id);
+                if !text.trim().is_empty() {
+                    scripts.push(ScriptSource::Inline(text));
+                }
+                return;
+            }
+        }
+    }
+
+    for child in doc.get_children(node_id) {
+        collect_script_elements(doc, child, scripts);
+    }
+}
+
+/// Executes all `<script>` blocks and external scripts for a document in document order.
+pub fn run_scripts_for_document(runtime: &mut JsRuntime, base_url: &str) {
+    let scripts = find_script_elements(&runtime.doc());
+    for script in scripts {
+        match script {
+            ScriptSource::Inline(code) => {
+                if let Err(e) = runtime.eval(&code) {
+                    eprintln!("JavaScript execution error: {}", e);
+                }
+            }
+            ScriptSource::External(src) => {
+                let resolved = resolve_url(base_url, &src);
+                match lilies_net::fetch(&resolved) {
+                    Ok(code) => {
+                        if let Err(e) = runtime.eval(&code) {
+                            eprintln!("JavaScript execution error in '{}': {}", resolved, e);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to fetch external script '{}': {}", resolved, e);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Cached rendering of the webpage for fast compositing during address bar interaction.
 #[derive(Clone, Debug)]
 pub struct CachedPage {
@@ -465,15 +556,24 @@ pub struct ShellState {
 
     pub cached_page: Option<CachedPage>,
     pub cached_window: Option<Pixmap>,
+
+    pub js_runtime: JsRuntime,
 }
 
 impl ShellState {
     pub fn new(initial_target: String) -> Self {
         let (html_content, current_url) = fetch_or_fallback(&initial_target);
         let doc = parse_html(&html_content);
-        let styles = load_styles_with_external(&doc, &current_url);
+        let mut styles = load_styles_with_external(&doc, &current_url);
         let image_cache = ImageCache::new();
         load_images_for_document(&doc, &current_url, &image_cache);
+
+        let mut js_runtime = JsRuntime::new(doc);
+        run_scripts_for_document(&mut js_runtime, &current_url);
+        if js_runtime.take_dirty() {
+            styles = load_styles_with_external(&js_runtime.doc(), &current_url);
+        }
+        let doc = js_runtime.doc().clone();
         let html_id = find_html_root(&doc).expect("Root <html> element required in document");
 
         Self {
@@ -494,6 +594,7 @@ impl ShellState {
             alt_pressed: false,
             cached_page: None,
             cached_window: None,
+            js_runtime,
         }
     }
 
@@ -501,8 +602,15 @@ impl ShellState {
         println!("Navigating to: {}", target_url);
         let (html_content, loaded_url) = fetch_or_fallback(target_url);
         let doc = parse_html(&html_content);
-        let styles = load_styles_with_external(&doc, &loaded_url);
+        let mut styles = load_styles_with_external(&doc, &loaded_url);
         load_images_for_document(&doc, &loaded_url, &self.image_cache);
+
+        let mut js_runtime = JsRuntime::new(doc);
+        run_scripts_for_document(&mut js_runtime, &loaded_url);
+        if js_runtime.take_dirty() {
+            styles = load_styles_with_external(&js_runtime.doc(), &loaded_url);
+        }
+        let doc = js_runtime.doc().clone();
         let Some(html_id) = find_html_root(&doc) else {
             eprintln!("Document missing <html> root element");
             return;
@@ -512,6 +620,7 @@ impl ShellState {
         self.styles = styles;
         self.html_id = html_id;
         self.current_url = loaded_url;
+        self.js_runtime = js_runtime;
         self.address_input_buffer = self.current_url.clone();
         self.cursor_position = self.address_input_buffer.len();
         self.scroll_offset_y = 0.0;
@@ -699,6 +808,9 @@ fn fetch_or_fallback(target: &str) -> (String, String) {
     }
     if target == "about:images" {
         return (IMAGE_DEMO_HTML.to_string(), "about:images".to_string());
+    }
+    if target == "about:js" {
+        return (JS_DEMO_HTML.to_string(), "about:js".to_string());
     }
 
     match lilies_net::fetch(target) {
@@ -897,6 +1009,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let resolved = resolve_url(&state.current_url, &href);
                             state.navigate(&resolved, true);
                             window.request_redraw();
+                        } else if let Some(hit_id) = hit {
+                            if let Err(e) = state.js_runtime.dispatch_click(hit_id) {
+                                eprintln!("JS error on click: {}", e);
+                            }
+                            if state.js_runtime.take_dirty() {
+                                state.doc = state.js_runtime.doc().clone();
+                                state.styles =
+                                    load_styles_with_external(&state.doc, &state.current_url);
+                                state.cached_page = None;
+                                state.cached_window = None;
+                                window.request_redraw();
+                            } else if was_focused {
+                                window.request_redraw();
+                            }
                         } else if was_focused {
                             window.request_redraw();
                         }
@@ -1016,6 +1142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use lilies_css::{
         compute_styles, compute_styles_for_document, parse_styles_from_document, StyleSheet,
     };
@@ -1884,5 +2011,92 @@ mod tests {
         assert!(state.cached_page.is_none());
         assert!(state.cached_window.is_none());
         assert_eq!(state.current_url, "about:blank");
+    }
+
+    #[test]
+    fn test_milestone12_about_js_demo_page_e2e() {
+        let mut state = ShellState::new("about:js".to_string());
+        assert_eq!(state.current_url, "about:js");
+
+        // Verify initial script executed during page load:
+        // Heading should have been changed from "Static Heading" to "Dynamic Heading (Set by JS)"
+        let heading_id = state
+            .js_runtime
+            .find_element_by_id("heading")
+            .expect("heading node must exist");
+        assert_eq!(
+            state.doc.text_content(heading_id),
+            "Dynamic Heading (Set by JS)"
+        );
+
+        let counter_id = state
+            .js_runtime
+            .find_element_by_id("counter-text")
+            .expect("counter node must exist");
+        assert_eq!(state.doc.text_content(counter_id), "Count: 0");
+
+        // Initial render
+        let frame1 = state.render_window_frame(800, 600).expect("initial frame");
+        assert_eq!(frame1.width, 800);
+        assert_eq!(frame1.height, 600);
+
+        // Click button once
+        let btn_id = state
+            .js_runtime
+            .find_element_by_id("btn")
+            .expect("btn node must exist");
+        state
+            .js_runtime
+            .dispatch_click(btn_id)
+            .expect("dispatch click failed");
+
+        assert!(state.js_runtime.take_dirty(), "DOM should be dirty after click");
+        state.doc = state.js_runtime.doc().clone();
+        assert_eq!(state.doc.text_content(counter_id), "Count: 1");
+
+        state.styles = load_styles_with_external(&state.doc, &state.current_url);
+        state.cached_page = None;
+        state.cached_window = None;
+
+        // Render frame after click
+        let frame2 = state.render_window_frame(800, 600).expect("frame after click");
+        assert_eq!(frame2.width, 800);
+
+        // Click button a second time
+        state
+            .js_runtime
+            .dispatch_click(btn_id)
+            .expect("second click failed");
+        assert!(state.js_runtime.take_dirty());
+        state.doc = state.js_runtime.doc().clone();
+        assert_eq!(state.doc.text_content(counter_id), "Count: 2");
+    }
+
+    #[test]
+    fn test_milestone12_external_script_loading() {
+        let temp_dir = std::env::temp_dir().join(format!("lilies_test_js_{}", std::process::id()));
+        let _ = fs::create_dir_all(&temp_dir);
+        let js_path = temp_dir.join("script.js");
+        let html_path = temp_dir.join("index.html");
+
+        fs::write(&js_path, "var el = document.getElementById('target'); el.textContent = 'Loaded from External';").unwrap();
+        let html_content = format!(
+            r#"<html><body><h2 id="target">Initial</h2><script src="{}"></script></body></html>"#,
+            js_path.to_str().unwrap()
+        );
+        fs::write(&html_path, html_content).unwrap();
+
+        let target_url = format!("file://{}", html_path.to_str().unwrap());
+        let state = ShellState::new(target_url);
+
+        let target_id = state
+            .js_runtime
+            .find_element_by_id("target")
+            .expect("target must exist");
+        assert_eq!(state.doc.text_content(target_id), "Loaded from External");
+
+        let _ = fs::remove_file(js_path);
+        let _ = fs::remove_file(html_path);
+        let _ = fs::remove_dir(temp_dir);
     }
 }

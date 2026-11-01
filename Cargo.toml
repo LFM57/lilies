@@ -8,6 +8,7 @@ members = [
     "crates/lilies-paint",
     "crates/lilies-shell",
     "crates/lilies-net",
+    "crates/lilies-js",
 ]
 
 [workspace.package]
@@ -28,3 +29,4 @@ lilies-css = { path = "crates/lilies-css" }
 lilies-layout = { path = "crates/lilies-layout" }
 lilies-paint = { path = "crates/lilies-paint" }
 lilies-net = { path = "crates/lilies-net" }
+lilies-js = { path = "crates/lilies-js" }
