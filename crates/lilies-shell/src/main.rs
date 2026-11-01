@@ -1,17 +1,19 @@
 #![deny(unsafe_code)]
 
-use lilies_css::{compute_styles, StyleSheet, StyleTree};
+use lilies_css::{compute_styles_for_document, StyleTree};
 use lilies_dom::{Document, NodeId};
 use lilies_html::parse_html;
-use lilies_layout::{build_layout_tree, layout, Dimensions, Rect};
-use lilies_paint::{build_display_list, rasterize, Color, Pixmap};
+use lilies_layout::{build_layout_tree, layout, Dimensions, EdgeSizes, Rect};
+use lilies_paint::{build_display_list, rasterize, Color, DisplayItem, DisplayList, Pixmap};
 use softbuffer::{Context, Surface};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use winit::dpi::LogicalSize;
-use winit::event::{Event, WindowEvent};
+use winit::event::{Event, MouseScrollDelta, WindowEvent};
 use winit::event_loop::EventLoop;
 use winit::window::{Window, WindowBuilder};
+
+pub const TOOLBAR_HEIGHT: u32 = 36;
 
 pub const DEFAULT_HTML: &str = r#"<html>
   <body style="background-color: #1e1e2e; color: #cdd6f4;">
@@ -29,7 +31,7 @@ pub const DEFAULT_HTML: &str = r#"<html>
   </body>
 </html>"#;
 
-/// Re-runs the layout engine and rasterizer for the document given the viewport dimensions.
+/// Re-runs the layout engine and rasterizer for the webpage given the viewport dimensions.
 pub fn render_to_pixmap(
     doc: &Document,
     html_id: NodeId,
@@ -37,11 +39,31 @@ pub fn render_to_pixmap(
     width: u32,
     height: u32,
 ) -> Option<Pixmap> {
+    render_webpage_to_pixmap(doc, html_id, styles, width, height, 0.0).map(|(pixmap, _)| pixmap)
+}
+
+/// Re-runs the layout engine and rasterizer for the webpage with a vertical scroll offset.
+/// Returns the rendered `Pixmap` and the `total_content_height`.
+pub fn render_webpage_to_pixmap(
+    doc: &Document,
+    html_id: NodeId,
+    styles: &StyleTree,
+    width: u32,
+    height: u32,
+    scroll_offset_y: f32,
+) -> Option<(Pixmap, f32)> {
     let mut root_box = build_layout_tree(html_id, doc.arena(), styles)?;
     let viewport = Dimensions::new(Rect::new(0.0, 0.0, width as f32, height as f32));
     layout(&mut root_box, viewport);
 
-    let display_list = build_display_list(&root_box);
+    let mut display_list = build_display_list(&root_box);
+    let total_content_height = display_list
+        .total_height()
+        .max(root_box.dimensions.margin_box().height);
+
+    if scroll_offset_y != 0.0 {
+        display_list.offset(0.0, -scroll_offset_y);
+    }
 
     let bg_color = doc
         .get_children(html_id)
@@ -64,7 +86,86 @@ pub fn render_to_pixmap(
 
     let mut pixmap = Pixmap::new(width, height, bg_color);
     rasterize(&display_list, &mut pixmap);
-    Some(pixmap)
+    Some((pixmap, total_content_height))
+}
+
+/// Renders the complete window frame including the address bar at the top and the webpage below it.
+#[allow(clippy::too_many_arguments)]
+pub fn render_window_pixmap(
+    doc: &Document,
+    html_id: NodeId,
+    styles: &StyleTree,
+    width: u32,
+    height: u32,
+    current_url: &str,
+    scroll_offset_y: &mut f32,
+    total_content_height: &mut f32,
+) -> Option<Pixmap> {
+    let mut window_pixmap = Pixmap::new(width, height, Color::rgb(0x18, 0x18, 0x25));
+
+    let page_height = height.saturating_sub(TOOLBAR_HEIGHT);
+    if page_height > 0 && width > 0 {
+        let (page_pixmap, content_h) = render_webpage_to_pixmap(
+            doc,
+            html_id,
+            styles,
+            width,
+            page_height,
+            *scroll_offset_y,
+        )?;
+        *total_content_height = content_h;
+        let max_scroll = (content_h - page_height as f32).max(0.0);
+        *scroll_offset_y = scroll_offset_y.clamp(0.0, max_scroll);
+
+        window_pixmap.blit(&page_pixmap, 0, TOOLBAR_HEIGHT);
+    } else {
+        *total_content_height = 0.0;
+        *scroll_offset_y = 0.0;
+    }
+
+    render_address_bar(&mut window_pixmap, current_url, width);
+
+    Some(window_pixmap)
+}
+
+fn render_address_bar(pixmap: &mut Pixmap, current_url: &str, width: u32) {
+    let mut bar_list = DisplayList::new();
+
+    // 1. Toolbar background
+    bar_list.push(DisplayItem::SolidColor {
+        rect: Rect::new(0.0, 0.0, width as f32, TOOLBAR_HEIGHT as f32),
+        color: Color::rgb(0x18, 0x18, 0x25),
+    });
+
+    // 2. Input box
+    if width > 32 {
+        let box_w = (width - 24) as f32;
+        bar_list.push(DisplayItem::SolidColor {
+            rect: Rect::new(12.0, 6.0, box_w, 24.0),
+            color: Color::rgb(0x31, 0x32, 0x44),
+        });
+        bar_list.push(DisplayItem::Border {
+            rect: Rect::new(12.0, 6.0, box_w, 24.0),
+            widths: EdgeSizes::new(1.0, 1.0, 1.0, 1.0),
+            color: Color::rgb(0x45, 0x47, 0x5a),
+        });
+
+        // URL text inside input box
+        bar_list.push(DisplayItem::Text {
+            text: current_url.to_string(),
+            rect: Rect::new(20.0, 9.0, box_w - 16.0, 18.0),
+            color: Color::rgb(0xcd, 0xd6, 0xf4),
+            font_size: 13.0,
+        });
+    }
+
+    // 3. Subtle bottom border separator
+    bar_list.push(DisplayItem::SolidColor {
+        rect: Rect::new(0.0, (TOOLBAR_HEIGHT - 1) as f32, width as f32, 1.0),
+        color: Color::rgb(0x45, 0x47, 0x5a),
+    });
+
+    rasterize(&bar_list, pixmap);
 }
 
 /// Copies RGBA pixels from `Pixmap` into a `softbuffer` `u32` slice in `0x00RRGGBB` format.
@@ -84,6 +185,7 @@ pub fn copy_pixmap_to_softbuffer(pixmap: &Pixmap, buffer: &mut [u32]) {
 }
 
 /// Executes dynamic layout, rasterization, and presentation onto the window surface.
+#[allow(clippy::too_many_arguments)]
 fn render_frame(
     surface: &mut Surface<Arc<Window>, Arc<Window>>,
     doc: &Document,
@@ -91,6 +193,9 @@ fn render_frame(
     styles: &StyleTree,
     width: u32,
     height: u32,
+    current_url: &str,
+    scroll_offset_y: &mut f32,
+    total_content_height: &mut f32,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else {
         return Ok(());
@@ -98,8 +203,17 @@ fn render_frame(
 
     surface.resize(w, h)?;
 
-    let pixmap = render_to_pixmap(doc, html_id, styles, width, height)
-        .ok_or("Failed to build layout tree from root")?;
+    let pixmap = render_window_pixmap(
+        doc,
+        html_id,
+        styles,
+        width,
+        height,
+        current_url,
+        scroll_offset_y,
+        total_content_height,
+    )
+    .ok_or("Failed to build layout tree from root")?;
 
     let mut buffer = surface.buffer_mut()?;
     copy_pixmap_to_softbuffer(&pixmap, &mut buffer);
@@ -110,25 +224,39 @@ fn render_frame(
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
-        "=== lilies: Modern Browser Engine (Milestone 6 - Text Layout & Font Rasterization) ==="
+        "=== lilies: Modern Browser Engine (Milestone 7 - Live Networking & Scrolling) ==="
     );
 
-    // Step 1: Parse HTML & compute styles once (document state)
-    let html_content = if let Some(path) = std::env::args().nth(1) {
-        std::fs::read_to_string(&path).unwrap_or_else(|err| {
-            eprintln!(
-                "Could not read '{}': {}. Using default demo HTML.",
-                path, err
+    // Step 1: Parse CLI argument or default to https://example.com
+    let target = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "https://example.com".to_string());
+    println!("Loading: {}", target);
+
+    let (html_content, current_url) = match lilies_net::fetch(&target) {
+        Ok(html) => {
+            println!(
+                "Successfully fetched {} bytes from '{}'",
+                html.len(),
+                target
             );
-            DEFAULT_HTML.to_string()
-        })
-    } else {
-        DEFAULT_HTML.to_string()
+            (html, target)
+        }
+        Err(err) => {
+            eprintln!(
+                "Could not fetch '{}': {}. Falling back to default demo HTML.",
+                target, err
+            );
+            (
+                DEFAULT_HTML.to_string(),
+                format!("{} (offline demo)", target),
+            )
+        }
     };
 
+    // Step 2: Parse HTML and compute styles merging <style> tags and inline attributes
     let doc = parse_html(&html_content);
-    let stylesheet = StyleSheet::new();
-    let styles = compute_styles(&doc, &stylesheet);
+    let styles = compute_styles_for_document(&doc);
 
     let html_id = doc
         .get_children(doc.root())
@@ -138,6 +266,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .and_then(|n| n.as_element())
                 .is_some_and(|el| el.tag_name() == "html")
         })
+        .or_else(|| {
+            doc.get_children(doc.root())
+                .into_iter()
+                .find(|&id| doc.node(id).and_then(|n| n.as_element()).is_some())
+        })
         .expect("Root <html> element required in document");
 
     println!(
@@ -145,7 +278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         doc.arena().len()
     );
 
-    // Step 2: Initialize EventLoop and Window titled "lilies"
+    // Step 3: Initialize EventLoop and Window titled "lilies"
     let event_loop = EventLoop::new()?;
     let window = Arc::new(
         WindowBuilder::new()
@@ -154,9 +287,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .build(&event_loop)?,
     );
 
-    // Step 3: Initialize softbuffer Context and Surface
+    // Step 4: Initialize softbuffer Context and Surface
     let context = Context::new(window.clone())?;
     let mut surface = Surface::new(&context, window.clone())?;
+
+    let mut scroll_offset_y: f32 = 0.0;
+    let mut total_content_height: f32 = 0.0;
 
     // Initial render with current window size
     let size = window.inner_size();
@@ -167,11 +303,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &styles,
         size.width,
         size.height,
+        &current_url,
+        &mut scroll_offset_y,
+        &mut total_content_height,
     ) {
         eprintln!("Initial render warning: {e}");
     }
 
-    // Step 4: Run event loop
+    // Step 5: Run event loop
     event_loop.run(move |event, elwt| match event {
         Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
             WindowEvent::Resized(physical_size) => {
@@ -182,8 +321,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &styles,
                     physical_size.width,
                     physical_size.height,
+                    &current_url,
+                    &mut scroll_offset_y,
+                    &mut total_content_height,
                 ) {
                     eprintln!("Render error on resize: {e}");
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let scroll_amount = match delta {
+                    MouseScrollDelta::LineDelta(_x, y) => -y * 36.0,
+                    MouseScrollDelta::PixelDelta(pos) => -pos.y as f32,
+                };
+                let old_scroll = scroll_offset_y;
+                let page_height = window
+                    .inner_size()
+                    .height
+                    .saturating_sub(TOOLBAR_HEIGHT) as f32;
+                let max_scroll = (total_content_height - page_height).max(0.0);
+                scroll_offset_y = (scroll_offset_y + scroll_amount).clamp(0.0, max_scroll);
+                if (scroll_offset_y - old_scroll).abs() > 0.001 {
+                    window.request_redraw();
                 }
             }
             WindowEvent::RedrawRequested => {
@@ -195,6 +353,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &styles,
                     size.width,
                     size.height,
+                    &current_url,
+                    &mut scroll_offset_y,
+                    &mut total_content_height,
                 ) {
                     eprintln!("Render error on redraw: {e}");
                 }
@@ -213,6 +374,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lilies_css::{compute_styles, parse_styles_from_document, StyleSheet};
 
     #[test]
     fn test_copy_pixmap_to_softbuffer() {
@@ -253,10 +415,6 @@ mod tests {
             })
             .expect("html element");
 
-        // 1. Viewport 800x600:
-        // Card width: 400. Remaining width: 800 - 400 = 400.
-        // Auto margins split equally: margin-left = 200, margin-right = 200.
-        // Card spans x in [200, 600).
         let pixmap_800 = render_to_pixmap(&doc, html_id, &styles, 800, 600).expect("pixmap");
         assert_eq!(pixmap_800.width, 800);
         assert_eq!(pixmap_800.height, 600);
@@ -265,18 +423,11 @@ mod tests {
         let bg_color = Color::rgba(0xff, 0xff, 0xff, 0xff);
 
         // At y = 60 (inside card vertically, margin-top is 50):
-        // Just outside left edge
         assert_eq!(pixmap_800.get_pixel(199, 60), Some(bg_color));
-        // Inside card
         assert_eq!(pixmap_800.get_pixel(200, 60), Some(card_color));
         assert_eq!(pixmap_800.get_pixel(599, 60), Some(card_color));
-        // Just outside right edge
         assert_eq!(pixmap_800.get_pixel(600, 60), Some(bg_color));
 
-        // 2. Viewport resized to 1000x600:
-        // Card width: 400. Remaining width: 1000 - 400 = 600.
-        // margin-left = 300, margin-right = 300.
-        // Card spans x in [300, 700).
         let pixmap_1000 = render_to_pixmap(&doc, html_id, &styles, 1000, 600).expect("pixmap");
         assert_eq!(pixmap_1000.width, 1000);
         assert_eq!(pixmap_1000.height, 600);
@@ -286,10 +437,6 @@ mod tests {
         assert_eq!(pixmap_1000.get_pixel(699, 60), Some(card_color));
         assert_eq!(pixmap_1000.get_pixel(700, 60), Some(bg_color));
 
-        // 3. Viewport resized to 600x600:
-        // Card width: 400. Remaining width: 600 - 400 = 200.
-        // margin-left = 100, margin-right = 100.
-        // Card spans x in [100, 500).
         let pixmap_600 = render_to_pixmap(&doc, html_id, &styles, 600, 600).expect("pixmap");
         assert_eq!(pixmap_600.width, 600);
         assert_eq!(pixmap_600.height, 600);
@@ -303,7 +450,7 @@ mod tests {
     #[test]
     fn test_milestone6_rich_document_render() {
         let doc = parse_html(DEFAULT_HTML);
-        let stylesheet = StyleSheet::new();
+        let stylesheet = parse_styles_from_document(&doc);
         let styles = compute_styles(&doc, &stylesheet);
         let html_id = doc
             .get_children(doc.root())
@@ -322,21 +469,14 @@ mod tests {
         let body_bg = Color::rgba(0x1e, 0x1e, 0x2e, 0xff);
         let container_bg = Color::rgba(0x31, 0x32, 0x44, 0xff);
 
-        // Outside container (e.g., at x = 50, y = 50): body background
         assert_eq!(pixmap.get_pixel(50, 50), Some(body_bg));
-
-        // Inside container (e.g. at container padding area: x = 80, y = 45): container background
         assert_eq!(pixmap.get_pixel(80, 45), Some(container_bg));
 
-        // Container is 600px width + 24px left padding + 24px right padding = 648px.
-        // Centered in 800px viewport: margin-left is (800 - 648) / 2 = 76px.
-        // Padding box spans [76, 724).
         assert_eq!(pixmap.get_pixel(75, 50), Some(body_bg));
         assert_eq!(pixmap.get_pixel(76, 50), Some(container_bg));
         assert_eq!(pixmap.get_pixel(723, 50), Some(container_bg));
         assert_eq!(pixmap.get_pixel(724, 50), Some(body_bg));
 
-        // There should be rasterized text pixels (which differ from both body_bg and container_bg)
         let text_pixels_count = pixmap
             .pixels
             .as_chunks::<4>()
@@ -353,8 +493,6 @@ mod tests {
             "Expected rasterized text pixels, found {}",
             text_pixels_count
         );
-
-        let _ = pixmap.save_ppm("../../output.ppm");
     }
 
     #[test]
@@ -372,21 +510,18 @@ mod tests {
             })
             .expect("html element");
 
-        // Layout at 800x600
         let mut root_800 = build_layout_tree(html_id, doc.arena(), &styles).unwrap();
         layout(
             &mut root_800,
             Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0)),
         );
 
-        // Layout at 1200x800
         let mut root_1200 = build_layout_tree(html_id, doc.arena(), &styles).unwrap();
         layout(
             &mut root_1200,
             Dimensions::new(Rect::new(0.0, 0.0, 1200.0, 800.0)),
         );
 
-        // The card is centered in both
         let body_800 = &root_800.children[0];
         let card_800 = &body_800.children[0];
         assert_eq!(card_800.dimensions.margin.left, 76.0);
@@ -399,7 +534,6 @@ mod tests {
         assert_eq!(card_1200.dimensions.content.width, 600.0);
         assert_eq!(card_1200.dimensions.content.x, 300.0);
 
-        // Verify reflow when container has auto width on viewport resize:
         let auto_html = r#"<html><body><p>One two three four five six seven eight nine ten eleven twelve thirteen fourteen fifteen</p></body></html>"#;
         let auto_doc = parse_html(auto_html);
         let auto_styles = compute_styles(&auto_doc, &stylesheet);
@@ -414,8 +548,8 @@ mod tests {
             })
             .unwrap();
 
-        // Wide viewport (800px): text fits on fewer lines
-        let mut wide_box = build_layout_tree(auto_html_id, auto_doc.arena(), &auto_styles).unwrap();
+        let mut wide_box =
+            build_layout_tree(auto_html_id, auto_doc.arena(), &auto_styles).unwrap();
         layout(
             &mut wide_box,
             Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0)),
@@ -424,7 +558,6 @@ mod tests {
         let wide_text = &wide_p.children[0];
         let wide_line_count = wide_text.lines.len();
 
-        // Narrow viewport (150px): text wraps into significantly more lines!
         let mut narrow_box =
             build_layout_tree(auto_html_id, auto_doc.arena(), &auto_styles).unwrap();
         layout(
@@ -435,17 +568,153 @@ mod tests {
         let narrow_text = &narrow_p.children[0];
         let narrow_line_count = narrow_text.lines.len();
 
-        assert!(
-            narrow_line_count > wide_line_count,
-            "Narrow line count ({}) should be greater than wide line count ({})",
-            narrow_line_count,
-            wide_line_count
+        assert!(narrow_line_count > wide_line_count);
+        assert!(narrow_p.dimensions.content.height > wide_p.dimensions.content.height);
+    }
+
+    #[test]
+    fn test_vertical_scrolling_offsets_page_content() {
+        let html = r#"<html>
+          <body style="background-color: #000000; margin: 0px; padding: 0px;">
+            <div id="first" style="background-color: #ff0000; width: 400px; height: 200px;"></div>
+            <div id="second" style="background-color: #0000ff; width: 400px; height: 200px;"></div>
+          </body>
+        </html>"#;
+
+        let doc = parse_html(html);
+        let styles = compute_styles_for_document(&doc);
+        let html_id = doc
+            .get_children(doc.root())
+            .into_iter()
+            .find(|&id| {
+                doc.node(id)
+                    .and_then(|n| n.as_element())
+                    .is_some_and(|el| el.tag_name() == "html")
+            })
+            .unwrap();
+
+        // 1. Render at scroll_offset_y = 0:
+        let (pixmap_top, total_h) =
+            render_webpage_to_pixmap(&doc, html_id, &styles, 400, 300, 0.0).expect("pixmap_top");
+        assert_eq!(total_h, 400.0);
+
+        let red = Color::rgb(255, 0, 0);
+        let blue = Color::rgb(0, 0, 255);
+
+        // At y = 50, first box (red) is visible
+        assert_eq!(pixmap_top.get_pixel(50, 50), Some(red));
+        // At y = 250, second box (blue) is visible
+        assert_eq!(pixmap_top.get_pixel(50, 250), Some(blue));
+
+        // 2. Render scrolled down by 100px:
+        let (pixmap_scrolled, _) =
+            render_webpage_to_pixmap(&doc, html_id, &styles, 400, 300, 100.0)
+                .expect("pixmap_scrolled");
+
+        // The first box was y in [0, 200), now offset by -100px -> y in [-100, 100).
+        // The second box was y in [200, 400), now offset by -100px -> y in [100, 300).
+        // At y = 50, red box is still there:
+        assert_eq!(pixmap_scrolled.get_pixel(50, 50), Some(red));
+        // At y = 150, blue box has scrolled up into view!
+        assert_eq!(pixmap_scrolled.get_pixel(50, 150), Some(blue));
+
+        // 3. Render scrolled down by 200px:
+        let (pixmap_scrolled_200, _) =
+            render_webpage_to_pixmap(&doc, html_id, &styles, 400, 300, 200.0)
+                .expect("pixmap_scrolled_200");
+
+        // At y = 50, blue box is now at the top!
+        assert_eq!(pixmap_scrolled_200.get_pixel(50, 50), Some(blue));
+    }
+
+    #[test]
+    fn test_window_address_bar_rendering_and_dimensions() {
+        let html = r#"<html><body style="background-color: #ffffff;"><p>Hello</p></body></html>"#;
+        let doc = parse_html(html);
+        let styles = compute_styles_for_document(&doc);
+        let html_id = doc
+            .get_children(doc.root())
+            .into_iter()
+            .find(|&id| {
+                doc.node(id)
+                    .and_then(|n| n.as_element())
+                    .is_some_and(|el| el.tag_name() == "html")
+            })
+            .unwrap();
+
+        let mut scroll_offset_y = 0.0;
+        let mut total_content_h = 0.0;
+        let url = "https://example.com";
+
+        let window_pixmap = render_window_pixmap(
+            &doc,
+            html_id,
+            &styles,
+            800,
+            600,
+            url,
+            &mut scroll_offset_y,
+            &mut total_content_h,
+        )
+        .expect("window pixmap");
+
+        assert_eq!(window_pixmap.width, 800);
+        assert_eq!(window_pixmap.height, 600);
+
+        // Top 36px is toolbar:
+        // Background color of toolbar at x = 2, y = 2:
+        assert_eq!(
+            window_pixmap.get_pixel(2, 2),
+            Some(Color::rgb(0x18, 0x18, 0x25))
         );
-        assert!(
-            narrow_p.dimensions.content.height > wide_p.dimensions.content.height,
-            "Narrow height ({}) should be greater than wide height ({})",
-            narrow_p.dimensions.content.height,
-            wide_p.dimensions.content.height
+
+        // Separator line at y = TOOLBAR_HEIGHT - 1 (y = 35):
+        assert_eq!(
+            window_pixmap.get_pixel(100, TOOLBAR_HEIGHT - 1),
+            Some(Color::rgb(0x45, 0x47, 0x5a))
         );
+
+        // Below toolbar (y = 40): webpage background (white)
+        assert_eq!(
+            window_pixmap.get_pixel(100, TOOLBAR_HEIGHT + 4),
+            Some(Color::WHITE)
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn test_e2e_fetch_and_render_example_com() {
+        let html = lilies_net::fetch("https://example.com").expect("fetch example.com");
+        let doc = parse_html(&html);
+        let styles = compute_styles_for_document(&doc);
+        let html_id = doc
+            .get_children(doc.root())
+            .into_iter()
+            .find(|&id| {
+                doc.node(id)
+                    .and_then(|n| n.as_element())
+                    .is_some_and(|el| el.tag_name() == "html")
+            })
+            .unwrap();
+
+        let mut scroll_offset_y = 0.0;
+        let mut total_content_height = 0.0;
+        let pixmap = render_window_pixmap(
+            &doc,
+            html_id,
+            &styles,
+            800,
+            600,
+            "https://example.com",
+            &mut scroll_offset_y,
+            &mut total_content_height,
+        )
+        .expect("render window pixmap");
+
+        assert_eq!(pixmap.width, 800);
+        assert_eq!(pixmap.height, 600);
+        assert!(total_content_height > 0.0);
+
+        let _ = pixmap.save_ppm("../../output_example_com.ppm");
     }
 }

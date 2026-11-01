@@ -83,6 +83,19 @@ impl Pixmap {
         writer.flush()?;
         Ok(())
     }
+
+    /// Blits another pixmap onto this pixmap at position `(dst_x, dst_y)`.
+    pub fn blit(&mut self, src: &Pixmap, dst_x: u32, dst_y: u32) {
+        let copy_w = src.width.min(self.width.saturating_sub(dst_x));
+        let copy_h = src.height.min(self.height.saturating_sub(dst_y));
+        for y in 0..copy_h {
+            let src_start = (y * src.width * 4) as usize;
+            let src_end = src_start + (copy_w * 4) as usize;
+            let dst_start = (((dst_y + y) * self.width + dst_x) * 4) as usize;
+            let dst_end = dst_start + (copy_w * 4) as usize;
+            self.pixels[dst_start..dst_end].copy_from_slice(&src.pixels[src_start..src_end]);
+        }
+    }
 }
 
 /// Blends a source pixel over a destination pixel using standard Porter-Duff Source-Over compositing:

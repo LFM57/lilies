@@ -28,11 +28,54 @@ impl CssParser {
                 break;
             }
 
-            let rule = self.parse_rule()?;
-            stylesheet.add_rule(rule);
+            match self.parse_rule() {
+                Ok(rule) => {
+                    stylesheet.add_rule(rule);
+                }
+                Err(_) => {
+                    self.skip_to_rule_end();
+                }
+            }
         }
 
         Ok(stylesheet)
+    }
+
+    /// Skips forward to the end of an invalid rule by finding '{' and its matching '}'.
+    fn skip_to_rule_end(&mut self) {
+        while let Some(c) = self.peek() {
+            self.pos += 1;
+            if c == '{' {
+                break;
+            }
+        }
+        let mut depth = 1;
+        while let Some(c) = self.peek() {
+            self.pos += 1;
+            if c == '{' {
+                depth += 1;
+            } else if c == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Skips forward to the end of an invalid declaration by stopping at ';' or '}'.
+    fn skip_to_declaration_end(&mut self) {
+        let mut paren_depth = 0;
+        while let Some(c) = self.peek() {
+            match c {
+                '(' => paren_depth += 1,
+                ')' if paren_depth > 0 => paren_depth -= 1,
+                ';' if paren_depth == 0 => break,
+                '}' if paren_depth == 0 => break,
+                _ => {}
+            }
+            self.pos += 1;
+        }
     }
 
     /// Parses a sequence of semicolon-separated declarations (e.g. from an HTML `style` attribute).
@@ -84,18 +127,25 @@ impl CssParser {
                 return Err(CssError::UnexpectedEof);
             }
 
-            let declaration = self.parse_declaration()?;
-            declarations.push(declaration);
+            match self.parse_declaration() {
+                Ok(declaration) => {
+                    declarations.push(declaration);
+                }
+                Err(_) => {
+                    self.skip_to_declaration_end();
+                }
+            }
 
             self.skip_whitespace_and_comments();
             if self.peek() == Some(';') {
                 self.pos += 1;
             } else if self.peek() == Some('}') {
                 // Trailing declaration without semicolon is valid CSS
-            } else {
-                return Err(CssError::ParseError(
-                    "Expected ';' or '}' after declaration".into(),
-                ));
+            } else if !self.is_eof() {
+                self.skip_to_declaration_end();
+                if self.peek() == Some(';') {
+                    self.pos += 1;
+                }
             }
         }
 
@@ -178,6 +228,11 @@ impl CssParser {
             if ch == ';' || ch == '}' {
                 break;
             }
+            if ch == ',' || ch == '/' {
+                self.pos += 1;
+                self.skip_whitespace_and_comments();
+                continue;
+            }
             let val = self.parse_single_value()?;
             values.push(val);
             self.skip_whitespace_and_comments();
@@ -254,17 +309,23 @@ impl CssParser {
                     CssError::ParseError(format!("Invalid numeric value: '{}'", num_str))
                 })?;
 
-                // Check for unit (e.g. px)
+                // Check for unit (e.g. px, em, rem, vh, vw, pt, %)
                 if let Some(c) = self.peek() {
-                    if is_ident_start(c) {
-                        let unit_str = self.parse_identifier()?;
-                        if unit_str.eq_ignore_ascii_case("px") {
-                            return Ok(Value::Length(num, Unit::Px));
+                    if is_ident_start(c) || c == '%' {
+                        let unit_str = if c == '%' {
+                            self.pos += 1;
+                            "%".to_string()
                         } else {
-                            return Err(CssError::ParseError(format!(
-                                "Unsupported unit: '{}'",
-                                unit_str
-                            )));
+                            self.parse_identifier()?
+                        };
+                        match unit_str.to_ascii_lowercase().as_str() {
+                            "px" => return Ok(Value::Length(num, Unit::Px)),
+                            "em" | "rem" => return Ok(Value::Length(num * 16.0, Unit::Px)),
+                            "vh" => return Ok(Value::Length(num * 6.0, Unit::Px)),
+                            "vw" => return Ok(Value::Length(num * 8.0, Unit::Px)),
+                            "pt" => return Ok(Value::Length(num * (96.0 / 72.0), Unit::Px)),
+                            "%" => return Ok(Value::Keyword(format!("{}%", num))),
+                            _ => return Ok(Value::Keyword(format!("{}{}", num, unit_str))),
                         }
                     }
                 }
@@ -285,6 +346,11 @@ impl CssParser {
                 && self.peek() == Some('(')
             {
                 return self.parse_rgb_function(&ident);
+            }
+
+            // Check for generic function: e.g. light-dark(...), calc(...), var(...)
+            if self.peek() == Some('(') {
+                return self.parse_generic_function(&ident);
             }
 
             // Check if it's a recognized named color
@@ -315,6 +381,40 @@ impl CssParser {
             "Unexpected character '{}' at position {}",
             ch, self.pos
         )))
+    }
+
+    /// Parses arbitrary functional notation: `fn_name(content...)`.
+    fn parse_generic_function(&mut self, fn_name: &str) -> Result<Value, CssError> {
+        self.consume_char('(')?;
+        let mut depth = 1;
+        let mut content = String::new();
+        while let Some(c) = self.peek() {
+            self.pos += 1;
+            if c == '(' {
+                depth += 1;
+            } else if c == ')' {
+                depth -= 1;
+                if depth == 0 {
+                    break;
+                }
+            }
+            content.push(c);
+        }
+        if depth > 0 {
+            return Err(CssError::UnexpectedEof);
+        }
+
+        // Support light-dark(light_color, dark_color) by extracting light color
+        if fn_name.eq_ignore_ascii_case("light-dark") {
+            let parts: Vec<&str> = content.split(',').map(|s| s.trim()).collect();
+            if let Some(&first) = parts.first() {
+                if let Some(color) = Color::from_hex(first).or_else(|| Color::from_name(first)) {
+                    return Ok(Value::Color(color));
+                }
+            }
+        }
+
+        Ok(Value::Keyword(format!("{}({})", fn_name, content)))
     }
 
     /// Parses functional color notation: `rgb(r, g, b)` or `rgba(r, g, b, a)`.

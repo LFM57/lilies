@@ -259,3 +259,18 @@ fn test_inline_style_attribute_overrides() {
     assert_eq!(div_style.height, LengthOrAuto::Px(100.0));
     assert_eq!(div_style.margin_top, LengthOrAuto::Px(20.0));
 }
+
+#[test]
+fn test_parse_real_world_css_example_com() {
+    let css = r#"html{color-scheme:light dark;background:light-dark(#eee,#222)}body{font:16px/1.6 system-ui,sans-serif;max-width:26em;margin:auto;padding:25vh 2em 2em;text-align:center}"#;
+    let stylesheet = parse_stylesheet(css).expect("parse example.com css");
+    assert_eq!(stylesheet.rules.len(), 2);
+
+    let r_html = &stylesheet.rules[0];
+    assert_eq!(r_html.selectors[0].tag_name.as_deref(), Some("html"));
+    assert!(r_html.declarations.iter().any(|d| d.name == "background"));
+
+    let r_body = &stylesheet.rules[1];
+    assert_eq!(r_body.selectors[0].tag_name.as_deref(), Some("body"));
+    assert!(r_body.declarations.iter().any(|d| d.name == "margin"));
+}

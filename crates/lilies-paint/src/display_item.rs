@@ -23,6 +23,35 @@ pub enum DisplayItem {
     },
 }
 
+impl DisplayItem {
+    /// Translates the display item by (dx, dy).
+    pub fn offset(&mut self, dx: f32, dy: f32) {
+        match self {
+            DisplayItem::SolidColor { rect, .. } => {
+                rect.x += dx;
+                rect.y += dy;
+            }
+            DisplayItem::Border { rect, .. } => {
+                rect.x += dx;
+                rect.y += dy;
+            }
+            DisplayItem::Text { rect, .. } => {
+                rect.x += dx;
+                rect.y += dy;
+            }
+        }
+    }
+
+    /// Returns the bounding rectangle of this display item.
+    pub fn rect(&self) -> Rect {
+        match self {
+            DisplayItem::SolidColor { rect, .. } => *rect,
+            DisplayItem::Border { rect, .. } => *rect,
+            DisplayItem::Text { rect, .. } => *rect,
+        }
+    }
+}
+
 /// An ordered list of display items to be rasterized to a 2D framebuffer.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct DisplayList {
@@ -33,6 +62,24 @@ impl DisplayList {
     /// Creates a new empty display list.
     pub fn new() -> Self {
         Self { items: Vec::new() }
+    }
+
+    /// Translates all display items in the list by (dx, dy).
+    pub fn offset(&mut self, dx: f32, dy: f32) {
+        for item in &mut self.items {
+            item.offset(dx, dy);
+        }
+    }
+
+    /// Computes the maximum bottom extent (y + height) across all items.
+    pub fn total_height(&self) -> f32 {
+        self.items
+            .iter()
+            .map(|item| {
+                let r = item.rect();
+                r.y + r.height
+            })
+            .fold(0.0f32, f32::max)
     }
 
     /// Appends a display item to the list.

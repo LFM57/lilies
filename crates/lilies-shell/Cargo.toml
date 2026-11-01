@@ -10,6 +10,7 @@ lilies-html.workspace = true
 lilies-css.workspace = true
 lilies-layout.workspace = true
 lilies-paint.workspace = true
+lilies-net.workspace = true
 thiserror.workspace = true
 winit = "0.29"
 softbuffer = "0.4"

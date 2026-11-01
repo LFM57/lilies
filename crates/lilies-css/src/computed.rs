@@ -351,6 +351,52 @@ pub fn compute_styles(doc: &Document, stylesheet: &StyleSheet) -> StyleTree {
     style_tree
 }
 
+/// Traverses the document tree to find all `<style>` elements, extracts their text,
+/// and parses them into a `StyleSheet`.
+pub fn parse_styles_from_document(doc: &Document) -> StyleSheet {
+    let mut css = String::new();
+    collect_style_nodes(doc, doc.root(), &mut css);
+    crate::parser::parse_stylesheet(&css).unwrap_or_default()
+}
+
+/// Helper that extracts `<style>` blocks from `doc`, parses them into a `StyleSheet`,
+/// and computes the `StyleTree` cascading rules from `<style>` tags and inline `style="..."` attributes.
+pub fn compute_styles_for_document(doc: &Document) -> StyleTree {
+    let stylesheet = parse_styles_from_document(doc);
+    compute_styles(doc, &stylesheet)
+}
+
+fn collect_style_nodes(doc: &Document, node_id: NodeId, out: &mut String) {
+    if let Some(node) = doc.node(node_id) {
+        if let Some(el) = node.as_element() {
+            if el.tag_name().eq_ignore_ascii_case("style") {
+                let mut style_content = String::new();
+                collect_text_nodes(doc, node_id, &mut style_content);
+                if !style_content.is_empty() {
+                    out.push_str(&style_content);
+                    out.push('\n');
+                }
+                return;
+            }
+        }
+    }
+
+    for child in doc.get_children(node_id) {
+        collect_style_nodes(doc, child, out);
+    }
+}
+
+fn collect_text_nodes(doc: &Document, node_id: NodeId, out: &mut String) {
+    for child in doc.get_children(node_id) {
+        if let Some(node) = doc.node(child) {
+            if let Some(text) = node.as_text() {
+                out.push_str(text.data());
+            }
+        }
+        collect_text_nodes(doc, child, out);
+    }
+}
+
 fn compute_node(
     node_id: NodeId,
     parent_style: Option<&ComputedStyle>,

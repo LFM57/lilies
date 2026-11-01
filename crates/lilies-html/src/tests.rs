@@ -140,3 +140,109 @@ fn test_void_and_self_closing_elements() {
 
     assert_eq!(dumped, expected);
 }
+
+#[test]
+fn test_style_tag_extraction_and_application() {
+    let html = r#"
+        <html>
+          <head>
+            <style>
+              body { background-color: #ffffff; color: #111111; }
+              h1 { color: #ff0000; font-size: 32px; }
+              p.intro { color: #0000ff; margin: 10px; }
+            </style>
+          </head>
+          <body>
+            <h1>Title</h1>
+            <p class="intro" style="color: #00ff00;">Green text</p>
+            <p>Normal text</p>
+          </body>
+        </html>
+    "#;
+
+    let doc = parse_html(html);
+    let style_text = crate::extract_style_text(&doc);
+    assert!(style_text.contains("h1 { color: #ff0000; font-size: 32px; }"));
+    assert!(style_text.contains("p.intro { color: #0000ff; margin: 10px; }"));
+
+    let styles = crate::compute_styles_for_document(&doc);
+
+    // Find body, h1, and p.intro elements
+    let root = doc.root();
+    let mut elements = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node_id) = stack.pop() {
+        if let Some(node) = doc.node(node_id) {
+            if let Some(el) = node.as_element() {
+                elements.push((
+                    node_id,
+                    el.tag_name().to_string(),
+                    el.get_attribute("class").map(|s| s.to_string()),
+                ));
+            }
+        }
+        for child in doc.get_children(node_id) {
+            stack.push(child);
+        }
+    }
+
+    let h1_id = elements
+        .iter()
+        .find(|(_, tag, _)| tag == "h1")
+        .unwrap()
+        .0;
+    let h1_style = styles.get(h1_id).expect("h1 style");
+    assert_eq!(h1_style.color, lilies_css::Color::rgb(255, 0, 0));
+    assert_eq!(h1_style.font_size, 32.0);
+
+    let intro_id = elements
+        .iter()
+        .find(|(_, tag, class)| tag == "p" && class.as_deref() == Some("intro"))
+        .unwrap()
+        .0;
+    let intro_style = styles.get(intro_id).expect("p.intro style");
+    // Inline style overrides style tag: color is green (not blue)
+    assert_eq!(intro_style.color, lilies_css::Color::rgb(0, 255, 0));
+    // Margin is preserved from style tag
+    assert_eq!(intro_style.margin_top, lilies_css::LengthOrAuto::Px(10.0));
+}
+
+#[test]
+fn test_multiple_style_blocks_and_cascade_order() {
+    let html = r#"
+        <html>
+          <head>
+            <style>
+              div.box { background-color: #ff0000; width: 100px; }
+            </style>
+          </head>
+          <body>
+            <style>
+              div.box { background-color: #0000ff; }
+            </style>
+            <div class="box"></div>
+          </body>
+        </html>
+    "#;
+
+    let doc = parse_html(html);
+    let styles = crate::compute_styles_for_document(&doc);
+
+    let div_id = doc
+        .get_children(doc.root())
+        .into_iter()
+        .flat_map(|id| doc.get_children(id))
+        .flat_map(|id| doc.get_children(id))
+        .find(|&id| {
+            doc.node(id)
+                .and_then(|n| n.as_element())
+                .is_some_and(|el| el.tag_name() == "div")
+        })
+        .unwrap();
+
+    let div_style = styles.get(div_id).unwrap();
+    // Later <style> block in body wins over earlier <style> block in head
+    assert_eq!(div_style.background_color, lilies_css::Color::rgb(0, 0, 255));
+    // Property from earlier block is preserved
+    assert_eq!(div_style.width, lilies_css::LengthOrAuto::Px(100.0));
+}
