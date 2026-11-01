@@ -395,3 +395,53 @@ fn test_load_styles_with_external_fetcher_cascade_merging() {
     // text-align from global.css is applied
     assert_eq!(h1_style.text_align, TextAlign::Center);
 }
+
+#[test]
+fn test_script_and_style_raw_text_with_comparison_operators() {
+    let html = r#"
+        <html>
+            <head>
+                <script>
+                    for (var i = 0; i < len; i++) {
+                        if (a < b && b > c) {
+                            console.log("inside");
+                        }
+                    }
+                </script>
+                <style>
+                    div > p { color: red; }
+                </style>
+            </head>
+            <body>
+                <p id="msg">Done</p>
+            </body>
+        </html>
+    "#;
+    let doc = parse_html(html);
+
+    // Locate the script element
+    let mut script_text = None;
+    let mut style_text = None;
+    let mut stack = vec![doc.root()];
+    while let Some(node_id) = stack.pop() {
+        if let Some(node) = doc.node(node_id) {
+            if let Some(el) = node.as_element() {
+                if el.tag_name().eq_ignore_ascii_case("script") {
+                    script_text = Some(doc.text_content(node_id));
+                } else if el.tag_name().eq_ignore_ascii_case("style") {
+                    style_text = Some(doc.text_content(node_id));
+                }
+            }
+        }
+        for &child in doc.get_children(node_id).iter().rev() {
+            stack.push(child);
+        }
+    }
+
+    let s_text = script_text.expect("script tag found");
+    assert!(s_text.contains("for (var i = 0; i < len; i++)"));
+    assert!(s_text.contains("if (a < b && b > c)"));
+
+    let st_text = style_text.expect("style tag found");
+    assert!(st_text.contains("div > p { color: red; }"));
+}

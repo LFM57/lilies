@@ -31,6 +31,7 @@ pub enum TokenizerState {
     DoctypeName,
     AfterDoctypeName,
     BogusComment,
+    RawText,
 }
 
 struct InputStream {
@@ -100,6 +101,7 @@ impl InputStream {
 pub struct Tokenizer {
     stream: InputStream,
     pub state: TokenizerState,
+    raw_tag_name: String,
 
     // Current tag being constructed
     current_tag_name: String,
@@ -126,6 +128,7 @@ impl Tokenizer {
         Self {
             stream: InputStream::new(input),
             state: TokenizerState::Data,
+            raw_tag_name: String::new(),
             current_tag_name: String::new(),
             current_attributes: IndexMap::new(),
             current_attr_name: String::new(),
@@ -159,6 +162,13 @@ impl Tokenizer {
         if self.is_end_tag {
             self.tokens.push_back(Token::EndTag { name });
         } else {
+            if !self_closing {
+                let lower = name.to_ascii_lowercase();
+                if matches!(lower.as_str(), "script" | "style" | "title" | "textarea") {
+                    self.state = TokenizerState::RawText;
+                    self.raw_tag_name = lower;
+                }
+            }
             self.tokens.push_back(Token::StartTag {
                 name,
                 attributes,
@@ -671,6 +681,47 @@ impl Tokenizer {
                 None => {
                     let comment = std::mem::take(&mut self.current_comment);
                     self.tokens.push_back(Token::Comment(comment));
+                    self.tokens.push_back(Token::Eof);
+                    self.eof_emitted = true;
+                }
+            },
+
+            TokenizerState::RawText => match ch {
+                Some('<') => {
+                    let saved_pos = self.stream.pos;
+                    let close_prefix = format!("/{}", self.raw_tag_name);
+                    if self.stream.match_case_insensitive_str(&close_prefix) {
+                        let next_ch = self.stream.next();
+                        let is_tag_end = match next_ch {
+                            Some('>') => true,
+                            Some(c) if c == '/' || c.is_ascii_whitespace() => {
+                                while let Some(c) = self.stream.next() {
+                                    if c == '>' {
+                                        break;
+                                    }
+                                }
+                                true
+                            }
+                            None => true,
+                            _ => false,
+                        };
+
+                        if is_tag_end {
+                            let tag_name = std::mem::take(&mut self.raw_tag_name);
+                            self.tokens.push_back(Token::EndTag { name: tag_name });
+                            self.state = TokenizerState::Data;
+                        } else {
+                            self.stream.pos = saved_pos;
+                            self.tokens.push_back(Token::Character('<'));
+                        }
+                    } else {
+                        self.tokens.push_back(Token::Character('<'));
+                    }
+                }
+                Some(c) => {
+                    self.tokens.push_back(Token::Character(c));
+                }
+                None => {
                     self.tokens.push_back(Token::Eof);
                     self.eof_emitted = true;
                 }

@@ -497,6 +497,7 @@ fn collect_script_elements(doc: &Document, node_id: NodeId, scripts: &mut Vec<Sc
 
 /// Executes all `<script>` blocks and external scripts for a document in document order.
 pub fn run_scripts_for_document(runtime: &mut JsRuntime, base_url: &str) {
+    runtime.set_location_url(base_url);
     let scripts = find_script_elements(&runtime.doc());
     for script in scripts {
         match script {

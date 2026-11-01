@@ -5,6 +5,116 @@ use lilies_dom::Document;
 use lilies_html::parse_html;
 
 #[test]
+fn test_script_with_for_loop_and_comparisons() {
+    let html = r#"
+        <html>
+            <body>
+                <p id="counter">0</p>
+                <script>
+                    var sum = 0;
+                    var arr = [10, 20, 30];
+                    for (var i = 0; i < arr.length; i++) {
+                        if (arr[i] < 25) {
+                            sum += arr[i];
+                        }
+                    }
+                    var p = document.getElementById("counter");
+                    p.textContent = "Sum: " + sum;
+                </script>
+            </body>
+        </html>
+    "#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    // Extract and run script
+    let script_node = runtime.find_element_by_id("counter").unwrap();
+    let parent = runtime.doc().parent(script_node).unwrap();
+    let children = runtime.doc().get_children(parent);
+    let mut scripts_to_run = Vec::new();
+    {
+        let doc = runtime.doc();
+        for child in children {
+            if let Some(node) = doc.node(child) {
+                if let Some(el) = node.as_element() {
+                    if el.tag_name().eq_ignore_ascii_case("script") {
+                        scripts_to_run.push(doc.text_content(child));
+                    }
+                }
+            }
+        }
+    }
+    for code in scripts_to_run {
+        runtime.eval(&code).expect("eval script with comparisons");
+    }
+
+    let p_node = runtime.find_element_by_id("counter").unwrap();
+    assert_eq!(runtime.doc().text_content(p_node), "Sum: 30");
+}
+
+#[test]
+fn test_browser_globals_and_document_properties() {
+    let html = r#"
+        <html>
+            <head><title>Test Page</title></head>
+            <body>
+                <form name="searchForm">
+                    <input name="q" value="query test">
+                    <button id="submitBtn">Search</button>
+                </form>
+            </body>
+        </html>
+    "#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval("window === globalThis && self === globalThis && top === globalThis")
+        .unwrap();
+    assert_eq!(res.as_boolean(), Some(true));
+
+    let loc_res = runtime.eval("window.location.pathname").unwrap();
+    assert_eq!(loc_res.as_string().map(|s| s.to_std_string_escaped()), Some("/".to_string()));
+
+    let doc_elem = runtime.eval("document.documentElement.tagName").unwrap();
+    assert_eq!(doc_elem.as_string().map(|s| s.to_std_string_escaped()), Some("HTML".to_string()));
+
+    let body_elem = runtime.eval("document.body.tagName").unwrap();
+    assert_eq!(body_elem.as_string().map(|s| s.to_std_string_escaped()), Some("BODY".to_string()));
+
+    let btn = runtime.eval("document.getElementById('submitBtn').form.q.value").unwrap();
+    assert_eq!(btn.as_string().map(|s| s.to_std_string_escaped()), Some("query test".to_string()));
+}
+
+#[test]
+fn test_google_html_scripts() {
+    let path = std::path::Path::new("/tmp/google.html");
+    if !path.exists() {
+        return;
+    }
+    let content = std::fs::read_to_string(path).unwrap();
+    let doc = parse_html(&content);
+    let mut scripts = Vec::new();
+    let mut stack = vec![doc.root()];
+    while let Some(node_id) = stack.pop() {
+        if let Some(node) = doc.node(node_id) {
+            if let Some(el) = node.as_element() {
+                if el.tag_name().eq_ignore_ascii_case("script") {
+                    scripts.push(doc.text_content(node_id));
+                }
+            }
+        }
+        for &child in doc.get_children(node_id).iter().rev() {
+            stack.push(child);
+        }
+    }
+    let mut runtime = JsRuntime::new(doc);
+    for (i, s) in scripts.iter().enumerate() {
+        runtime.eval(s).unwrap_or_else(|e| panic!("Script {} failed: {}", i, e));
+    }
+}
+
+#[test]
 fn test_eval_expressions() {
     let doc = Document::new();
     let mut runtime = JsRuntime::new(doc);
