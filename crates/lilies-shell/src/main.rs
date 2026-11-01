@@ -347,11 +347,15 @@ pub fn resolve_url(base_url: &str, href: &str) -> String {
 /// Auto-prepends `https://` if no scheme is specified.
 pub fn normalize_address_input(input: &str) -> String {
     let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return "https://example.com".to_string();
+    if trimmed.is_empty() || trimmed == "about:welcome" || trimmed == "about:blank" {
+        return if trimmed.is_empty() {
+            "about:welcome".to_string()
+        } else {
+            trimmed.to_string()
+        };
     }
 
-    if trimmed.contains("://") || trimmed.starts_with("file:") {
+    if trimmed.contains("://") || trimmed.starts_with("file:") || trimmed.starts_with("about:") {
         trimmed.to_string()
     } else {
         format!("https://{}", trimmed)
@@ -401,6 +405,17 @@ pub fn load_images_for_document(doc: &Document, base_url: &str, cache: &ImageCac
     }
 }
 
+/// Cached rendering of the webpage for fast compositing during address bar interaction.
+#[derive(Clone, Debug)]
+pub struct CachedPage {
+    pub pixmap: Pixmap,
+    pub layout_box: LayoutBox,
+    pub width: u32,
+    pub page_height: u32,
+    pub scroll_offset_y: f32,
+    pub total_content_height: f32,
+}
+
 /// Shell state holding browser DOM, styles, navigation history, and interactive UI state.
 pub struct ShellState {
     pub current_url: String,
@@ -421,6 +436,9 @@ pub struct ShellState {
 
     pub mouse_pos: (f64, f64),
     pub alt_pressed: bool,
+
+    pub cached_page: Option<CachedPage>,
+    pub cached_window: Option<Pixmap>,
 }
 
 impl ShellState {
@@ -448,6 +466,8 @@ impl ShellState {
             is_address_bar_focused: false,
             mouse_pos: (0.0, 0.0),
             alt_pressed: false,
+            cached_page: None,
+            cached_window: None,
         }
     }
 
@@ -470,6 +490,8 @@ impl ShellState {
         self.cursor_position = self.address_input_buffer.len();
         self.scroll_offset_y = 0.0;
         self.is_address_bar_focused = false;
+        self.cached_page = None;
+        self.cached_window = None;
 
         if push_history {
             self.history.truncate(self.history_index + 1);
@@ -522,9 +544,131 @@ impl ShellState {
             false
         }
     }
+
+    /// Renders the complete browser window frame with caching for the webpage.
+    ///
+    /// When only address bar state changes (e.g. while typing, moving the cursor, or focusing),
+    /// the rendered webpage pixels and layout tree are reused from the cache, avoiding expensive
+    /// layout recomputation and rasterization on every keystroke.
+    pub fn render_window_frame(&mut self, width: u32, height: u32) -> Option<&Pixmap> {
+        let page_height = height.saturating_sub(TOOLBAR_HEIGHT);
+
+        // 1. Check if cached page is valid
+        let need_page_render = match &self.cached_page {
+            Some(cached) => {
+                cached.width != width
+                    || cached.page_height != page_height
+                    || (cached.scroll_offset_y - self.scroll_offset_y).abs() > 0.001
+            }
+            None => true,
+        };
+
+        if need_page_render {
+            if page_height > 0 && width > 0 {
+                let (page_pixmap, content_h, lbox) = render_webpage_with_images(
+                    &self.doc,
+                    self.html_id,
+                    &self.styles,
+                    width,
+                    page_height,
+                    self.scroll_offset_y,
+                    &self.image_cache,
+                )?;
+                self.total_content_height = content_h;
+                let max_scroll = (content_h - page_height as f32).max(0.0);
+                self.scroll_offset_y = self.scroll_offset_y.clamp(0.0, max_scroll);
+                self.current_layout_box = Some(lbox.clone());
+
+                self.cached_page = Some(CachedPage {
+                    pixmap: page_pixmap,
+                    layout_box: lbox,
+                    width,
+                    page_height,
+                    scroll_offset_y: self.scroll_offset_y,
+                    total_content_height: content_h,
+                });
+            } else {
+                self.total_content_height = 0.0;
+                self.scroll_offset_y = 0.0;
+                let mut empty_box = build_layout_tree_with_cache(
+                    self.html_id,
+                    self.doc.arena(),
+                    &self.styles,
+                    &self.image_cache,
+                )?;
+                let viewport =
+                    Dimensions::new(Rect::new(0.0, 0.0, width as f32, page_height as f32));
+                layout(&mut empty_box, viewport);
+                self.current_layout_box = Some(empty_box.clone());
+
+                let empty_pixmap = Pixmap::new(width, page_height, Color::rgb(0x18, 0x18, 0x25));
+                self.cached_page = Some(CachedPage {
+                    pixmap: empty_pixmap,
+                    layout_box: empty_box,
+                    width,
+                    page_height,
+                    scroll_offset_y: 0.0,
+                    total_content_height: 0.0,
+                });
+            }
+
+            // Page re-rendered: reconstruct window pixmap with new webpage blit
+            let mut window_pixmap = Pixmap::new(width, height, Color::rgb(0x18, 0x18, 0x25));
+            if let Some(cached) = &self.cached_page {
+                window_pixmap.blit(&cached.pixmap, 0, TOOLBAR_HEIGHT);
+            }
+            self.cached_window = Some(window_pixmap);
+        } else if self.current_layout_box.is_none() {
+            if let Some(cached) = &self.cached_page {
+                self.current_layout_box = Some(cached.layout_box.clone());
+            }
+        }
+
+        // 2. Ensure cached_window exists and has matching dimensions
+        let window_needs_rebuild = match &self.cached_window {
+            Some(win) => win.width != width || win.height != height,
+            None => true,
+        };
+        if window_needs_rebuild {
+            let mut window_pixmap = Pixmap::new(width, height, Color::rgb(0x18, 0x18, 0x25));
+            if let Some(cached) = &self.cached_page {
+                window_pixmap.blit(&cached.pixmap, 0, TOOLBAR_HEIGHT);
+            }
+            self.cached_window = Some(window_pixmap);
+        }
+
+        // 3. Render address bar onto cached_window (extremely fast <0.1ms)
+        let displayed_url = if self.is_address_bar_focused {
+            &self.address_input_buffer
+        } else {
+            &self.current_url
+        };
+
+        if let Some(window_pixmap) = &mut self.cached_window {
+            render_address_bar(
+                window_pixmap,
+                displayed_url,
+                width,
+                self.is_address_bar_focused,
+                self.cursor_position,
+            );
+        }
+
+        self.cached_window.as_ref()
+    }
 }
 
 fn fetch_or_fallback(target: &str) -> (String, String) {
+    if target == "about:blank" {
+        return (
+            "<html><body style=\"background-color: #1e1e2e;\"></body></html>".to_string(),
+            "about:blank".to_string(),
+        );
+    }
+    if target == "about:welcome" || target.is_empty() {
+        return (DEFAULT_HTML.to_string(), "about:welcome".to_string());
+    }
+
     match lilies_net::fetch(target) {
         Ok(html) => {
             println!(
@@ -588,38 +732,24 @@ fn render_frame(
 
     surface.resize(w, h)?;
 
-    let (pixmap, layout_box) = render_window_pixmap_interactive_with_cache(
-        &state.doc,
-        state.html_id,
-        &state.styles,
-        width,
-        height,
-        &state.current_url,
-        &mut state.scroll_offset_y,
-        &mut state.total_content_height,
-        state.is_address_bar_focused,
-        &state.address_input_buffer,
-        state.cursor_position,
-        &state.image_cache,
-    )
-    .ok_or("Failed to build layout tree from root")?;
-
-    state.current_layout_box = Some(layout_box);
+    let pixmap = state
+        .render_window_frame(width, height)
+        .ok_or("Failed to build layout tree from root")?;
 
     let mut buffer = surface.buffer_mut()?;
-    copy_pixmap_to_softbuffer(&pixmap, &mut buffer);
+    copy_pixmap_to_softbuffer(pixmap, &mut buffer);
     buffer.present()?;
 
     Ok(())
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("=== lilies: Modern Browser Engine (Milestone 8 - Interactive Navigation) ===");
+    println!("=== lilies: Modern Browser Engine (Milestone 10 - Fast Interactive Navigation) ===");
 
-    // Step 1: Parse CLI argument or default to https://example.com
+    // Step 1: Parse CLI argument or default to welcome page
     let target = std::env::args()
         .nth(1)
-        .unwrap_or_else(|| "https://example.com".to_string());
+        .unwrap_or_else(|| "about:welcome".to_string());
     println!("Loading: {}", target);
 
     let mut state = ShellState::new(target);
@@ -1274,7 +1404,9 @@ mod tests {
             normalize_address_input("   crates.io/crates/lilies   "),
             "https://crates.io/crates/lilies"
         );
-        assert_eq!(normalize_address_input("   "), "https://example.com");
+        assert_eq!(normalize_address_input("   "), "about:welcome");
+        assert_eq!(normalize_address_input("about:welcome"), "about:welcome");
+        assert_eq!(normalize_address_input("about:blank"), "about:blank");
     }
 
     #[test]
@@ -1591,5 +1723,96 @@ mod tests {
         assert!(total_h > 100.0);
         assert_eq!(pixmap.width, 800);
         assert_eq!(pixmap.height, 600);
+    }
+
+    #[test]
+    fn test_default_startup_welcome_page() {
+        let (html, url) = fetch_or_fallback("about:welcome");
+        assert_eq!(url, "about:welcome");
+        assert_eq!(html, DEFAULT_HTML);
+
+        let (empty_html, empty_url) = fetch_or_fallback("");
+        assert_eq!(empty_url, "about:welcome");
+        assert_eq!(empty_html, DEFAULT_HTML);
+
+        let (blank_html, blank_url) = fetch_or_fallback("about:blank");
+        assert_eq!(blank_url, "about:blank");
+        assert!(blank_html.contains("body"));
+
+        let state = ShellState::new("about:welcome".to_string());
+        assert_eq!(state.current_url, "about:welcome");
+        assert_eq!(state.address_input_buffer, "about:welcome");
+        assert!(state.doc.arena().len() > 1);
+    }
+
+    #[test]
+    fn test_address_bar_typing_fast_cache_hit() {
+        let mut state = ShellState::new("about:welcome".to_string());
+        assert!(state.cached_page.is_none());
+        assert!(state.cached_window.is_none());
+
+        // First frame: renders page from scratch and populates cache
+        let (initial_window_webpage_pixel, width, height) = {
+            let frame = state.render_window_frame(800, 600).expect("first frame");
+            (
+                frame.get_pixel(400, TOOLBAR_HEIGHT + 100),
+                frame.width,
+                frame.height,
+            )
+        };
+        assert_eq!(width, 800);
+        assert_eq!(height, 600);
+        assert!(state.cached_page.is_some());
+        assert!(state.cached_window.is_some());
+
+        let initial_page_pixel = state.cached_page.as_ref().unwrap().pixmap.get_pixel(400, 100);
+        assert_eq!(initial_page_pixel, initial_window_webpage_pixel);
+
+        // User focuses address bar and types
+        state.is_address_bar_focused = true;
+        state.address_input_buffer = "hello".to_string();
+        state.cursor_position = 5;
+
+        // Second frame: should be a fast cache hit!
+        let second_pixel = state
+            .render_window_frame(800, 600)
+            .expect("second frame")
+            .get_pixel(400, TOOLBAR_HEIGHT + 100);
+
+        // The cached_page should still be intact and untouched
+        assert_eq!(
+            state.cached_page.as_ref().unwrap().pixmap.get_pixel(400, 100),
+            initial_page_pixel
+        );
+        // The webpage area below TOOLBAR_HEIGHT must remain identical
+        assert_eq!(second_pixel, initial_window_webpage_pixel);
+
+        // Third frame: typing more characters
+        state.handle_char_input(" world");
+        assert_eq!(state.address_input_buffer, "hello world");
+        let third_pixel = state
+            .render_window_frame(800, 600)
+            .expect("third frame")
+            .get_pixel(400, TOOLBAR_HEIGHT + 100);
+        assert_eq!(third_pixel, initial_window_webpage_pixel);
+
+        // Resizing window invalidates cached page and re-renders
+        let (resized_w, resized_h) = {
+            let resized_frame = state.render_window_frame(600, 500).expect("resized frame");
+            (resized_frame.width, resized_frame.height)
+        };
+        assert_eq!(resized_w, 600);
+        assert_eq!(resized_h, 500);
+        assert_eq!(state.cached_page.as_ref().unwrap().width, 600);
+        assert_eq!(
+            state.cached_page.as_ref().unwrap().page_height,
+            500 - TOOLBAR_HEIGHT
+        );
+
+        // Navigating to new URL invalidates both caches
+        state.navigate("about:blank", true);
+        assert!(state.cached_page.is_none());
+        assert!(state.cached_window.is_none());
+        assert_eq!(state.current_url, "about:blank");
     }
 }
