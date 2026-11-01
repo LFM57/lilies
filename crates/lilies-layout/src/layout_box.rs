@@ -2,7 +2,9 @@
 
 use crate::box_model::Dimensions;
 use crate::font::TextLine;
-use lilies_css::{ComputedStyle, LengthOrAuto};
+use lilies_css::{
+    AlignItems, ComputedStyle, Display, FlexDirection, JustifyContent, LengthOrAuto,
+};
 use lilies_dom::NodeId;
 use lilies_net::DecodedImage;
 use std::sync::Arc;
@@ -157,8 +159,32 @@ impl LayoutBox {
         crate::hit_test::hit_test(self, x, y)
     }
 
+    /// Recursively translates this layout box and all descendants / text lines by (dx, dy).
+    pub fn offset_by(&mut self, dx: f32, dy: f32) {
+        if dx == 0.0 && dy == 0.0 {
+            return;
+        }
+        self.dimensions.content.x += dx;
+        self.dimensions.content.y += dy;
+        for line in &mut self.lines {
+            line.rect.x += dx;
+            line.rect.y += dy;
+        }
+        for child in &mut self.children {
+            child.offset_by(dx, dy);
+        }
+    }
+
     /// Recursively lays out this box and all of its descendants within the containing block.
     pub fn layout(&mut self, containing_block: Dimensions) {
+        if self
+            .style
+            .as_ref()
+            .is_some_and(|s| s.display == Display::Flex)
+        {
+            self.layout_flex(&containing_block);
+            return;
+        }
         match &self.box_type {
             BoxType::BlockNode(_) | BoxType::AnonymousBlock => self.layout_block(containing_block),
             BoxType::InlineNode(_) => self.layout_inline(containing_block),
@@ -656,4 +682,720 @@ impl LayoutBox {
             + self.dimensions.border.top
             + self.dimensions.padding.top;
     }
+
+    /// Lays out the internal contents (text lines or descendant children) of a flex item.
+    fn layout_flex_item(&mut self) {
+        if self
+            .style
+            .as_ref()
+            .is_some_and(|s| s.display == Display::Flex)
+        {
+            let cb = self.dimensions;
+            self.layout_flex(&cb);
+            return;
+        }
+
+        match &self.box_type {
+            BoxType::BlockNode(_) | BoxType::AnonymousBlock => {
+                self.layout_block_children();
+                self.calculate_block_height();
+            }
+            BoxType::InlineNode(_) => {
+                if let Some(ref text) = self.text {
+                    let font_size = self.style.as_ref().map_or(16.0, |s| s.font_size);
+                    let available_width = if self.dimensions.content.width > 0.0 {
+                        self.dimensions.content.width
+                    } else {
+                        f32::INFINITY
+                    };
+                    self.lines = crate::font::wrap_text(
+                        text,
+                        font_size,
+                        available_width,
+                        self.dimensions.content.x,
+                        self.dimensions.content.y,
+                    );
+                    if !self.lines.is_empty() {
+                        let line_h = crate::font::line_height(font_size);
+                        self.dimensions.content.height = self.lines.len() as f32 * line_h;
+                        let min_x = self
+                            .lines
+                            .iter()
+                            .map(|l| l.rect.x)
+                            .fold(f32::INFINITY, f32::min);
+                        let max_x = self
+                            .lines
+                            .iter()
+                            .map(|l| l.rect.x + l.rect.width)
+                            .fold(f32::NEG_INFINITY, f32::max);
+                        if min_x.is_finite()
+                            && max_x.is_finite()
+                            && max_x >= min_x
+                            && self.dimensions.content.width == 0.0
+                        {
+                            self.dimensions.content.width = max_x - min_x;
+                        }
+                    }
+                } else if !self.children.is_empty() {
+                    let mut total_h = 0.0f32;
+                    let mut max_w = 0.0f32;
+                    let child_cb = self.dimensions;
+                    for c in &mut self.children {
+                        c.layout(child_cb);
+                        total_h += c.dimensions.margin_box().height;
+                        max_w = max_w.max(c.dimensions.margin_box().width);
+                    }
+                    if self.dimensions.content.height == 0.0 {
+                        self.dimensions.content.height = total_h;
+                    }
+                    if self.dimensions.content.width == 0.0 {
+                        self.dimensions.content.width = max_w;
+                    }
+                }
+            }
+            BoxType::ImageNode(..) => {}
+        }
+    }
+
+    /// Lays out a flex container and its children according to CSS Flexbox rules.
+    pub fn layout_flex(&mut self, containing_block: &Dimensions) {
+        let dir = self
+            .style
+            .as_ref()
+            .map_or(FlexDirection::Row, |s| s.flex_direction);
+        match dir {
+            FlexDirection::Row => self.layout_flex_row(containing_block),
+            FlexDirection::Column => self.layout_flex_column(containing_block),
+        }
+    }
+
+    /// Lays out items along a horizontal main axis (X) and vertical cross axis (Y).
+    fn layout_flex_row(&mut self, containing_block: &Dimensions) {
+        if self.dimensions.content.width == 0.0 {
+            self.calculate_block_width(containing_block);
+            self.calculate_block_position(containing_block);
+        } else {
+            if let Some(ref style) = self.style {
+                self.dimensions.padding.top = style.padding_top;
+                self.dimensions.padding.bottom = style.padding_bottom;
+                self.dimensions.padding.left = style.padding_left;
+                self.dimensions.padding.right = style.padding_right;
+
+                self.dimensions.margin.top = match style.margin_top {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                self.dimensions.margin.bottom = match style.margin_bottom {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                self.dimensions.margin.left = match style.margin_left {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                self.dimensions.margin.right = match style.margin_right {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+            }
+            if self.dimensions.content.x == 0.0 && self.dimensions.content.y == 0.0 {
+                self.calculate_block_position(containing_block);
+            }
+        }
+
+        let gap = self.style.as_ref().map_or(0.0, |s| s.gap);
+        let justify_content = self
+            .style
+            .as_ref()
+            .map_or(JustifyContent::FlexStart, |s| s.justify_content);
+        let align_items = self
+            .style
+            .as_ref()
+            .map_or(AlignItems::Stretch, |s| s.align_items);
+
+        let n = self.children.len();
+        let total_gap = if n > 1 { (n - 1) as f32 * gap } else { 0.0 };
+
+        // 1. Measure base content width for each child
+        for child in &mut self.children {
+            if let Some(ref style) = child.style {
+                child.dimensions.padding.top = style.padding_top;
+                child.dimensions.padding.bottom = style.padding_bottom;
+                child.dimensions.padding.left = style.padding_left;
+                child.dimensions.padding.right = style.padding_right;
+
+                child.dimensions.margin.top = match style.margin_top {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                child.dimensions.margin.bottom = match style.margin_bottom {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                child.dimensions.margin.left = match style.margin_left {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                child.dimensions.margin.right = match style.margin_right {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+            }
+
+            let base_w = if let Some(w) = child.style.as_ref().and_then(|s| s.width.to_px()) {
+                w
+            } else {
+                measure_box_content_width(child)
+            };
+            child.dimensions.content.width = base_w;
+        }
+
+        let total_base_children_w: f32 = self
+            .children
+            .iter()
+            .map(|c| {
+                c.dimensions.content.width
+                    + c.dimensions.margin.left
+                    + c.dimensions.border.left
+                    + c.dimensions.padding.left
+                    + c.dimensions.padding.right
+                    + c.dimensions.border.right
+                    + c.dimensions.margin.right
+            })
+            .sum();
+        let total_used_w = total_base_children_w + total_gap;
+
+        if self.dimensions.content.width == 0.0 {
+            self.dimensions.content.width = total_used_w;
+        }
+        let container_w = self.dimensions.content.width;
+
+        // 2. Handle flex-grow along main axis
+        let free_space = container_w - total_used_w;
+        let total_flex_grow: f32 = self
+            .children
+            .iter()
+            .map(|c| c.style.as_ref().map_or(0.0, |s| s.flex_grow))
+            .sum();
+
+        if free_space > 0.0 && total_flex_grow > 0.0 {
+            for child in &mut self.children {
+                let grow = child.style.as_ref().map_or(0.0, |s| s.flex_grow);
+                if grow > 0.0 {
+                    let added = free_space * (grow / total_flex_grow);
+                    child.dimensions.content.width += added;
+                }
+            }
+        }
+
+        // 3. Layout each child to calculate cross-axis size (height)
+        for child in &mut self.children {
+            child.dimensions.content.x = self.dimensions.content.x;
+            child.dimensions.content.y = self.dimensions.content.y;
+            child.layout_flex_item();
+        }
+
+        // 4. Container cross-axis sizing (height)
+        let explicit_height = self.style.as_ref().and_then(|s| s.height.to_px());
+        let max_child_outer_h = self
+            .children
+            .iter()
+            .map(|c| c.dimensions.margin_box().height)
+            .fold(0.0f32, f32::max);
+        let inner_h = explicit_height.unwrap_or(max_child_outer_h);
+        self.dimensions.content.height = inner_h;
+
+        // 5. Position items along main axis (justify-content) and cross axis (align-items)
+        let final_items_w: f32 = self
+            .children
+            .iter()
+            .map(|c| c.dimensions.margin_box().width)
+            .sum::<f32>()
+            + total_gap;
+        let remaining_space = (container_w - final_items_w).max(0.0);
+
+        let (mut current_x, extra_spacing) = match justify_content {
+            JustifyContent::FlexStart => (self.dimensions.content.x, 0.0),
+            JustifyContent::FlexEnd => (self.dimensions.content.x + remaining_space, 0.0),
+            JustifyContent::Center => (self.dimensions.content.x + remaining_space / 2.0, 0.0),
+            JustifyContent::SpaceBetween => {
+                if n > 1 {
+                    (self.dimensions.content.x, remaining_space / (n - 1) as f32)
+                } else {
+                    (self.dimensions.content.x, 0.0)
+                }
+            }
+            JustifyContent::SpaceAround => {
+                if n > 0 {
+                    let per_item = remaining_space / n as f32;
+                    (self.dimensions.content.x + per_item / 2.0, per_item)
+                } else {
+                    (self.dimensions.content.x, 0.0)
+                }
+            }
+        };
+
+        for child in &mut self.children {
+            let target_x = current_x
+                + child.dimensions.margin.left
+                + child.dimensions.border.left
+                + child.dimensions.padding.left;
+
+            let non_content_h = child.dimensions.margin.top
+                + child.dimensions.border.top
+                + child.dimensions.padding.top
+                + child.dimensions.padding.bottom
+                + child.dimensions.border.bottom
+                + child.dimensions.margin.bottom;
+
+            let target_y = match align_items {
+                AlignItems::FlexStart => {
+                    self.dimensions.content.y
+                        + child.dimensions.margin.top
+                        + child.dimensions.border.top
+                        + child.dimensions.padding.top
+                }
+                AlignItems::FlexEnd => {
+                    let outer_h = child.dimensions.margin_box().height;
+                    self.dimensions.content.y + (self.dimensions.content.height - outer_h)
+                        + child.dimensions.margin.top
+                        + child.dimensions.border.top
+                        + child.dimensions.padding.top
+                }
+                AlignItems::Center => {
+                    let outer_h = child.dimensions.margin_box().height;
+                    let free_y = (self.dimensions.content.height - outer_h).max(0.0);
+                    self.dimensions.content.y + free_y / 2.0
+                        + child.dimensions.margin.top
+                        + child.dimensions.border.top
+                        + child.dimensions.padding.top
+                }
+                AlignItems::Stretch => {
+                    if child.style.as_ref().is_none_or(|s| s.height.is_auto()) {
+                        child.dimensions.content.height = (self.dimensions.content.height
+                            - non_content_h)
+                            .max(child.dimensions.content.height);
+                    }
+                    self.dimensions.content.y
+                        + child.dimensions.margin.top
+                        + child.dimensions.border.top
+                        + child.dimensions.padding.top
+                }
+            };
+
+            let delta_x = target_x - child.dimensions.content.x;
+            let delta_y = target_y - child.dimensions.content.y;
+            child.offset_by(delta_x, delta_y);
+
+            current_x += child.dimensions.margin_box().width + gap + extra_spacing;
+        }
+    }
+
+    /// Lays out items along a vertical main axis (Y) and horizontal cross axis (X).
+    fn layout_flex_column(&mut self, containing_block: &Dimensions) {
+        if self.dimensions.content.width == 0.0 {
+            self.calculate_block_width(containing_block);
+            self.calculate_block_position(containing_block);
+        } else {
+            if let Some(ref style) = self.style {
+                self.dimensions.padding.top = style.padding_top;
+                self.dimensions.padding.bottom = style.padding_bottom;
+                self.dimensions.padding.left = style.padding_left;
+                self.dimensions.padding.right = style.padding_right;
+
+                self.dimensions.margin.top = match style.margin_top {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                self.dimensions.margin.bottom = match style.margin_bottom {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                self.dimensions.margin.left = match style.margin_left {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                self.dimensions.margin.right = match style.margin_right {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+            }
+            if self.dimensions.content.x == 0.0 && self.dimensions.content.y == 0.0 {
+                self.calculate_block_position(containing_block);
+            }
+        }
+
+        let gap = self.style.as_ref().map_or(0.0, |s| s.gap);
+        let justify_content = self
+            .style
+            .as_ref()
+            .map_or(JustifyContent::FlexStart, |s| s.justify_content);
+        let align_items = self
+            .style
+            .as_ref()
+            .map_or(AlignItems::Stretch, |s| s.align_items);
+
+        let n = self.children.len();
+        let total_gap = if n > 1 { (n - 1) as f32 * gap } else { 0.0 };
+
+        // 1. Determine cross-axis size (width) and layout each child to measure height
+        for child in &mut self.children {
+            if let Some(ref style) = child.style {
+                child.dimensions.padding.top = style.padding_top;
+                child.dimensions.padding.bottom = style.padding_bottom;
+                child.dimensions.padding.left = style.padding_left;
+                child.dimensions.padding.right = style.padding_right;
+
+                child.dimensions.margin.top = match style.margin_top {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                child.dimensions.margin.bottom = match style.margin_bottom {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                child.dimensions.margin.left = match style.margin_left {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+                child.dimensions.margin.right = match style.margin_right {
+                    LengthOrAuto::Px(v) => v,
+                    LengthOrAuto::Auto => 0.0,
+                };
+            }
+
+            let non_content_w = child.dimensions.margin.left
+                + child.dimensions.border.left
+                + child.dimensions.padding.left
+                + child.dimensions.padding.right
+                + child.dimensions.border.right
+                + child.dimensions.margin.right;
+
+            let w = if let Some(w) = child.style.as_ref().and_then(|s| s.width.to_px()) {
+                w
+            } else if align_items == AlignItems::Stretch && self.dimensions.content.width > 0.0 {
+                (self.dimensions.content.width - non_content_w).max(0.0)
+            } else {
+                measure_box_content_width(child)
+            };
+            child.dimensions.content.width = w;
+            child.dimensions.content.x = self.dimensions.content.x;
+            child.dimensions.content.y = self.dimensions.content.y;
+            child.layout_flex_item();
+        }
+
+        let total_base_children_h: f32 = self
+            .children
+            .iter()
+            .map(|c| c.dimensions.margin_box().height)
+            .sum();
+        let total_used_h = total_base_children_h + total_gap;
+
+        let explicit_height = self.style.as_ref().and_then(|s| s.height.to_px());
+        let container_h = explicit_height.unwrap_or(total_used_h);
+        self.dimensions.content.height = container_h;
+
+        // 2. Handle flex-grow along vertical main axis
+        if let Some(h) = explicit_height {
+            let free_space = h - total_used_h;
+            let total_flex_grow: f32 = self
+                .children
+                .iter()
+                .map(|c| c.style.as_ref().map_or(0.0, |s| s.flex_grow))
+                .sum();
+            if free_space > 0.0 && total_flex_grow > 0.0 {
+                for child in &mut self.children {
+                    let grow = child.style.as_ref().map_or(0.0, |s| s.flex_grow);
+                    if grow > 0.0 {
+                        let added = free_space * (grow / total_flex_grow);
+                        child.dimensions.content.height += added;
+                    }
+                }
+            }
+        }
+
+        // 3. Position items along main axis (justify-content) and cross axis (align-items)
+        let final_items_h: f32 = self
+            .children
+            .iter()
+            .map(|c| c.dimensions.margin_box().height)
+            .sum::<f32>()
+            + total_gap;
+        let remaining_space = (container_h - final_items_h).max(0.0);
+
+        let (mut current_y, extra_spacing) = match justify_content {
+            JustifyContent::FlexStart => (self.dimensions.content.y, 0.0),
+            JustifyContent::FlexEnd => (self.dimensions.content.y + remaining_space, 0.0),
+            JustifyContent::Center => (self.dimensions.content.y + remaining_space / 2.0, 0.0),
+            JustifyContent::SpaceBetween => {
+                if n > 1 {
+                    (self.dimensions.content.y, remaining_space / (n - 1) as f32)
+                } else {
+                    (self.dimensions.content.y, 0.0)
+                }
+            }
+            JustifyContent::SpaceAround => {
+                if n > 0 {
+                    let per_item = remaining_space / n as f32;
+                    (self.dimensions.content.y + per_item / 2.0, per_item)
+                } else {
+                    (self.dimensions.content.y, 0.0)
+                }
+            }
+        };
+
+        for child in &mut self.children {
+            let target_y = current_y
+                + child.dimensions.margin.top
+                + child.dimensions.border.top
+                + child.dimensions.padding.top;
+
+            let non_content_w = child.dimensions.margin.left
+                + child.dimensions.border.left
+                + child.dimensions.padding.left
+                + child.dimensions.padding.right
+                + child.dimensions.border.right
+                + child.dimensions.margin.right;
+
+            let target_x = match align_items {
+                AlignItems::FlexStart => {
+                    self.dimensions.content.x
+                        + child.dimensions.margin.left
+                        + child.dimensions.border.left
+                        + child.dimensions.padding.left
+                }
+                AlignItems::FlexEnd => {
+                    let outer_w = child.dimensions.margin_box().width;
+                    self.dimensions.content.x + (self.dimensions.content.width - outer_w)
+                        + child.dimensions.margin.left
+                        + child.dimensions.border.left
+                        + child.dimensions.padding.left
+                }
+                AlignItems::Center => {
+                    let outer_w = child.dimensions.margin_box().width;
+                    let free_x = (self.dimensions.content.width - outer_w).max(0.0);
+                    self.dimensions.content.x + free_x / 2.0
+                        + child.dimensions.margin.left
+                        + child.dimensions.border.left
+                        + child.dimensions.padding.left
+                }
+                AlignItems::Stretch => {
+                    if child.style.as_ref().is_none_or(|s| s.width.is_auto()) {
+                        child.dimensions.content.width = (self.dimensions.content.width
+                            - non_content_w)
+                            .max(child.dimensions.content.width);
+                    }
+                    self.dimensions.content.x
+                        + child.dimensions.margin.left
+                        + child.dimensions.border.left
+                        + child.dimensions.padding.left
+                }
+            };
+
+            let delta_x = target_x - child.dimensions.content.x;
+            let delta_y = target_y - child.dimensions.content.y;
+            child.offset_by(delta_x, delta_y);
+
+            current_y += child.dimensions.margin_box().height + gap + extra_spacing;
+        }
+
+        if self.dimensions.content.width == 0.0 {
+            let max_w = self
+                .children
+                .iter()
+                .map(|c| c.dimensions.margin_box().width)
+                .fold(0.0f32, f32::max);
+            self.dimensions.content.width = max_w;
+        }
+    }
+}
+
+/// Measures the intrinsic content width of a layout box.
+pub fn measure_box_content_width(layout_box: &LayoutBox) -> f32 {
+    if let Some(w) = layout_box.style.as_ref().and_then(|s| s.width.to_px()) {
+        return w;
+    }
+    if let Some(ref text) = layout_box.text {
+        let font_size = layout_box.style.as_ref().map_or(16.0, |s| s.font_size);
+        return crate::font::measure_text(text, font_size);
+    }
+    if let Some(img) = layout_box.image() {
+        return layout_box.dimensions.content.width.max(img.width as f32);
+    }
+    if !layout_box.children.is_empty() {
+        let is_flex = layout_box
+            .style
+            .as_ref()
+            .is_some_and(|s| s.display == lilies_css::Display::Flex);
+        if is_flex {
+            let dir = layout_box
+                .style
+                .as_ref()
+                .map_or(lilies_css::FlexDirection::Row, |s| s.flex_direction);
+            let gap = layout_box.style.as_ref().map_or(0.0, |s| s.gap);
+            match dir {
+                lilies_css::FlexDirection::Row => {
+                    let count = layout_box.children.len();
+                    let gaps = if count > 1 { (count - 1) as f32 * gap } else { 0.0 };
+                    let sum: f32 = layout_box
+                        .children
+                        .iter()
+                        .map(measure_box_outer_width)
+                        .sum();
+                    return sum + gaps;
+                }
+                lilies_css::FlexDirection::Column => {
+                    return layout_box
+                        .children
+                        .iter()
+                        .map(measure_box_outer_width)
+                        .fold(0.0f32, f32::max);
+                }
+            }
+        } else {
+            let all_inline = layout_box.children.iter().all(|c| c.is_inline());
+            if all_inline {
+                return layout_box
+                    .children
+                    .iter()
+                    .map(measure_box_outer_width)
+                    .sum();
+            } else {
+                return layout_box
+                    .children
+                    .iter()
+                    .map(measure_box_outer_width)
+                    .fold(0.0f32, f32::max);
+            }
+        }
+    }
+    layout_box.dimensions.content.width
+}
+
+/// Measures the intrinsic outer width of a layout box (content + paddings + borders + margins).
+pub fn measure_box_outer_width(layout_box: &LayoutBox) -> f32 {
+    let content_w = measure_box_content_width(layout_box);
+    let (pl, pr, ml, mr, bl, br) = if let Some(ref style) = layout_box.style {
+        let ml = match style.margin_left {
+            LengthOrAuto::Px(v) => v,
+            LengthOrAuto::Auto => 0.0,
+        };
+        let mr = match style.margin_right {
+            LengthOrAuto::Px(v) => v,
+            LengthOrAuto::Auto => 0.0,
+        };
+        (
+            style.padding_left,
+            style.padding_right,
+            ml,
+            mr,
+            layout_box.dimensions.border.left,
+            layout_box.dimensions.border.right,
+        )
+    } else {
+        (
+            layout_box.dimensions.padding.left,
+            layout_box.dimensions.padding.right,
+            layout_box.dimensions.margin.left,
+            layout_box.dimensions.margin.right,
+            layout_box.dimensions.border.left,
+            layout_box.dimensions.border.right,
+        )
+    };
+    content_w + pl + pr + ml + mr + bl + br
+}
+
+/// Measures the intrinsic content height of a layout box.
+pub fn measure_box_content_height(layout_box: &LayoutBox) -> f32 {
+    if let Some(h) = layout_box.style.as_ref().and_then(|s| s.height.to_px()) {
+        return h;
+    }
+    if layout_box.text.is_some() {
+        let font_size = layout_box.style.as_ref().map_or(16.0, |s| s.font_size);
+        return crate::font::line_height(font_size);
+    }
+    if let Some(img) = layout_box.image() {
+        return layout_box.dimensions.content.height.max(img.height as f32);
+    }
+    if !layout_box.children.is_empty() {
+        let is_flex = layout_box
+            .style
+            .as_ref()
+            .is_some_and(|s| s.display == lilies_css::Display::Flex);
+        if is_flex {
+            let dir = layout_box
+                .style
+                .as_ref()
+                .map_or(lilies_css::FlexDirection::Row, |s| s.flex_direction);
+            let gap = layout_box.style.as_ref().map_or(0.0, |s| s.gap);
+            match dir {
+                lilies_css::FlexDirection::Row => {
+                    return layout_box
+                        .children
+                        .iter()
+                        .map(measure_box_outer_height)
+                        .fold(0.0f32, f32::max);
+                }
+                lilies_css::FlexDirection::Column => {
+                    let count = layout_box.children.len();
+                    let gaps = if count > 1 { (count - 1) as f32 * gap } else { 0.0 };
+                    let sum: f32 = layout_box
+                        .children
+                        .iter()
+                        .map(measure_box_outer_height)
+                        .sum();
+                    return sum + gaps;
+                }
+            }
+        } else {
+            let all_inline = layout_box.children.iter().all(|c| c.is_inline());
+            if all_inline {
+                return layout_box
+                    .children
+                    .iter()
+                    .map(measure_box_outer_height)
+                    .fold(0.0f32, f32::max);
+            } else {
+                return layout_box
+                    .children
+                    .iter()
+                    .map(measure_box_outer_height)
+                    .sum();
+            }
+        }
+    }
+    layout_box.dimensions.content.height
+}
+
+/// Measures the intrinsic outer height of a layout box (content + paddings + borders + margins).
+pub fn measure_box_outer_height(layout_box: &LayoutBox) -> f32 {
+    let content_h = measure_box_content_height(layout_box);
+    let (pt, pb, mt, mb, bt, bb) = if let Some(ref style) = layout_box.style {
+        let mt = match style.margin_top {
+            LengthOrAuto::Px(v) => v,
+            LengthOrAuto::Auto => 0.0,
+        };
+        let mb = match style.margin_bottom {
+            LengthOrAuto::Px(v) => v,
+            LengthOrAuto::Auto => 0.0,
+        };
+        (
+            style.padding_top,
+            style.padding_bottom,
+            mt,
+            mb,
+            layout_box.dimensions.border.top,
+            layout_box.dimensions.border.bottom,
+        )
+    } else {
+        (
+            layout_box.dimensions.padding.top,
+            layout_box.dimensions.padding.bottom,
+            layout_box.dimensions.margin.top,
+            layout_box.dimensions.margin.bottom,
+            layout_box.dimensions.border.top,
+            layout_box.dimensions.border.bottom,
+        )
+    };
+    content_h + pt + pb + mt + mb + bt + bb
 }

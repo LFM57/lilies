@@ -13,7 +13,37 @@ pub enum Display {
     #[default]
     Inline,
     Block,
+    Flex,
     None,
+}
+
+/// CSS `flex-direction` property values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FlexDirection {
+    #[default]
+    Row,
+    Column,
+}
+
+/// CSS `justify-content` property values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum JustifyContent {
+    #[default]
+    FlexStart,
+    FlexEnd,
+    Center,
+    SpaceBetween,
+    SpaceAround,
+}
+
+/// CSS `align-items` property values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AlignItems {
+    #[default]
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center,
 }
 
 /// A CSS length or the `auto` keyword.
@@ -65,6 +95,11 @@ pub struct ComputedStyle {
     pub color: Color,
     pub font_size: f32,
     pub text_align: TextAlign,
+    pub flex_direction: FlexDirection,
+    pub justify_content: JustifyContent,
+    pub align_items: AlignItems,
+    pub gap: f32,
+    pub flex_grow: f32,
 }
 
 impl Default for ComputedStyle {
@@ -86,6 +121,11 @@ impl Default for ComputedStyle {
             color: Color::BLACK,
             font_size: 16.0,
             text_align: TextAlign::Left,
+            flex_direction: FlexDirection::Row,
+            justify_content: JustifyContent::FlexStart,
+            align_items: AlignItems::Stretch,
+            gap: 0.0,
+            flex_grow: 0.0,
         }
     }
 }
@@ -142,6 +182,7 @@ impl ComputedStyle {
                     match k.to_ascii_lowercase().as_str() {
                         "block" => self.display = Display::Block,
                         "inline" => self.display = Display::Inline,
+                        "flex" => self.display = Display::Flex,
                         "none" => self.display = Display::None,
                         _ => {}
                     }
@@ -269,6 +310,74 @@ impl ComputedStyle {
 
             "padding" => {
                 self.apply_padding_shorthand(val, root_font_size);
+            }
+
+            "flex-direction" => {
+                if let Some(k) = val.as_keyword() {
+                    match k.to_ascii_lowercase().as_str() {
+                        "row" => self.flex_direction = FlexDirection::Row,
+                        "column" => self.flex_direction = FlexDirection::Column,
+                        _ => {}
+                    }
+                }
+            }
+
+            "justify-content" => {
+                if let Some(k) = val.as_keyword() {
+                    match k.to_ascii_lowercase().as_str() {
+                        "flex-start" | "start" => self.justify_content = JustifyContent::FlexStart,
+                        "flex-end" | "end" => self.justify_content = JustifyContent::FlexEnd,
+                        "center" => self.justify_content = JustifyContent::Center,
+                        "space-between" => self.justify_content = JustifyContent::SpaceBetween,
+                        "space-around" => self.justify_content = JustifyContent::SpaceAround,
+                        _ => {}
+                    }
+                }
+            }
+
+            "align-items" => {
+                if let Some(k) = val.as_keyword() {
+                    match k.to_ascii_lowercase().as_str() {
+                        "stretch" => self.align_items = AlignItems::Stretch,
+                        "flex-start" | "start" => self.align_items = AlignItems::FlexStart,
+                        "flex-end" | "end" => self.align_items = AlignItems::FlexEnd,
+                        "center" => self.align_items = AlignItems::Center,
+                        _ => {}
+                    }
+                }
+            }
+
+            "gap" => {
+                let first = match val {
+                    Value::List(items) => items.first().unwrap_or(val),
+                    single => single,
+                };
+                if let Some(g) = resolve_length(first, self.font_size, root_font_size) {
+                    self.gap = g.max(0.0);
+                }
+            }
+
+            "flex-grow" => {
+                if let Some(g) = val.to_number() {
+                    self.flex_grow = g.max(0.0);
+                }
+            }
+
+            "flex" => {
+                match val {
+                    Value::List(items) => {
+                        if let Some(first) = items.first() {
+                            if let Some(g) = first.to_number() {
+                                self.flex_grow = g.max(0.0);
+                            }
+                        }
+                    }
+                    single => {
+                        if let Some(g) = single.to_number() {
+                            self.flex_grow = g.max(0.0);
+                        }
+                    }
+                }
             }
 
             _ => {}

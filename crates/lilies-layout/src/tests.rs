@@ -2,7 +2,8 @@
 
 use crate::{build_layout_tree, layout, BoxType, Dimensions, EdgeSizes, LayoutBox, Rect};
 use lilies_css::{
-    compute_styles, parse_stylesheet, ComputedStyle, Display, LengthOrAuto, StyleTree,
+    compute_styles, parse_stylesheet, AlignItems, ComputedStyle, Display, FlexDirection,
+    JustifyContent, LengthOrAuto, StyleTree,
 };
 use lilies_dom::{Document, IndexMap, NodeId};
 use lilies_html::parse_html;
@@ -1057,4 +1058,318 @@ fn test_missing_image_fallback_to_alt_text() {
     assert_eq!(fallback.text.as_deref(), Some("Fallback Alt"));
     assert!(fallback.dimensions.content.width > 0.0);
     assert!(fallback.dimensions.content.height > 0.0);
+}
+
+#[test]
+fn test_flex_row_side_by_side_increasing_x_identical_y() {
+    let mut container = LayoutBox::new(BoxType::AnonymousBlock);
+    container.style = Some(ComputedStyle {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        width: LengthOrAuto::Px(400.0),
+        height: LengthOrAuto::Px(100.0),
+        justify_content: JustifyContent::FlexStart,
+        align_items: AlignItems::FlexStart,
+        ..Default::default()
+    });
+
+    for _ in 0..3 {
+        let mut child = LayoutBox::new(BoxType::AnonymousBlock);
+        child.style = Some(ComputedStyle {
+            display: Display::Block,
+            width: LengthOrAuto::Px(80.0),
+            height: LengthOrAuto::Px(40.0),
+            ..Default::default()
+        });
+        container.children.push(child);
+    }
+
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 400.0, 0.0));
+    container.layout(cb);
+
+    let c0 = &container.children[0];
+    let c1 = &container.children[1];
+    let c2 = &container.children[2];
+
+    assert_eq!(c0.dimensions.content.x, 0.0);
+    assert_eq!(c1.dimensions.content.x, 80.0);
+    assert_eq!(c2.dimensions.content.x, 160.0);
+
+    // Verify children have increasing X coordinates side-by-side with identical Y coordinates
+    assert!(c0.dimensions.content.x < c1.dimensions.content.x);
+    assert!(c1.dimensions.content.x < c2.dimensions.content.x);
+    assert_eq!(c0.dimensions.content.y, c1.dimensions.content.y);
+    assert_eq!(c1.dimensions.content.y, c2.dimensions.content.y);
+    assert_eq!(c0.dimensions.content.y, 0.0);
+}
+
+#[test]
+fn test_flex_justify_content_space_between_and_center() {
+    // 1. Center
+    let mut center_container = LayoutBox::new(BoxType::AnonymousBlock);
+    center_container.style = Some(ComputedStyle {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        width: LengthOrAuto::Px(400.0),
+        height: LengthOrAuto::Px(100.0),
+        justify_content: JustifyContent::Center,
+        align_items: AlignItems::FlexStart,
+        ..Default::default()
+    });
+    for _ in 0..2 {
+        let mut child = LayoutBox::new(BoxType::AnonymousBlock);
+        child.style = Some(ComputedStyle {
+            display: Display::Block,
+            width: LengthOrAuto::Px(100.0),
+            height: LengthOrAuto::Px(40.0),
+            ..Default::default()
+        });
+        center_container.children.push(child);
+    }
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 400.0, 0.0));
+    center_container.layout(cb);
+
+    // Total children width = 200. Free space = 200. Left space = 100.
+    assert_eq!(center_container.children[0].dimensions.content.x, 100.0);
+    assert_eq!(center_container.children[1].dimensions.content.x, 200.0);
+
+    // 2. SpaceBetween
+    let mut sb_container = LayoutBox::new(BoxType::AnonymousBlock);
+    sb_container.style = Some(ComputedStyle {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        width: LengthOrAuto::Px(400.0),
+        height: LengthOrAuto::Px(100.0),
+        justify_content: JustifyContent::SpaceBetween,
+        align_items: AlignItems::FlexStart,
+        ..Default::default()
+    });
+    for _ in 0..2 {
+        let mut child = LayoutBox::new(BoxType::AnonymousBlock);
+        child.style = Some(ComputedStyle {
+            display: Display::Block,
+            width: LengthOrAuto::Px(100.0),
+            height: LengthOrAuto::Px(40.0),
+            ..Default::default()
+        });
+        sb_container.children.push(child);
+    }
+    sb_container.layout(cb);
+
+    // First item at start (0), last item at end (400 - 100 = 300)
+    assert_eq!(sb_container.children[0].dimensions.content.x, 0.0);
+    assert_eq!(sb_container.children[1].dimensions.content.x, 300.0);
+
+    // 3. SpaceAround
+    let mut sa_container = LayoutBox::new(BoxType::AnonymousBlock);
+    sa_container.style = Some(ComputedStyle {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        width: LengthOrAuto::Px(400.0),
+        height: LengthOrAuto::Px(100.0),
+        justify_content: JustifyContent::SpaceAround,
+        align_items: AlignItems::FlexStart,
+        ..Default::default()
+    });
+    for _ in 0..2 {
+        let mut child = LayoutBox::new(BoxType::AnonymousBlock);
+        child.style = Some(ComputedStyle {
+            display: Display::Block,
+            width: LengthOrAuto::Px(100.0),
+            height: LengthOrAuto::Px(40.0),
+            ..Default::default()
+        });
+        sa_container.children.push(child);
+    }
+    sa_container.layout(cb);
+
+    // Free space = 200. Per item = 100. Item 0 starts at 100 / 2 = 50. Item 1 starts at 50 + 100 + 100 = 250.
+    assert_eq!(sa_container.children[0].dimensions.content.x, 50.0);
+    assert_eq!(sa_container.children[1].dimensions.content.x, 250.0);
+}
+
+#[test]
+fn test_flex_grow_expansion_of_free_space() {
+    let mut container = LayoutBox::new(BoxType::AnonymousBlock);
+    container.style = Some(ComputedStyle {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        width: LengthOrAuto::Px(400.0),
+        height: LengthOrAuto::Px(100.0),
+        justify_content: JustifyContent::FlexStart,
+        ..Default::default()
+    });
+
+    let mut c1 = LayoutBox::new(BoxType::AnonymousBlock);
+    c1.style = Some(ComputedStyle {
+        display: Display::Block,
+        width: LengthOrAuto::Px(100.0),
+        height: LengthOrAuto::Px(50.0),
+        flex_grow: 1.0,
+        ..Default::default()
+    });
+
+    let mut c2 = LayoutBox::new(BoxType::AnonymousBlock);
+    c2.style = Some(ComputedStyle {
+        display: Display::Block,
+        width: LengthOrAuto::Px(100.0),
+        height: LengthOrAuto::Px(50.0),
+        flex_grow: 3.0,
+        ..Default::default()
+    });
+
+    container.children.push(c1);
+    container.children.push(c2);
+
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 400.0, 0.0));
+    container.layout(cb);
+
+    // Total base = 200. Free = 200. Total flex grow = 4.
+    // c1 gets 200 * (1/4) = 50 -> width 150.
+    // c2 gets 200 * (3/4) = 150 -> width 250.
+    assert_eq!(container.children[0].dimensions.content.width, 150.0);
+    assert_eq!(container.children[1].dimensions.content.width, 250.0);
+    assert_eq!(container.children[0].dimensions.content.x, 0.0);
+    assert_eq!(container.children[1].dimensions.content.x, 150.0);
+}
+
+#[test]
+fn test_flex_gap_offset_between_items() {
+    let mut container = LayoutBox::new(BoxType::AnonymousBlock);
+    container.style = Some(ComputedStyle {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        width: LengthOrAuto::Px(400.0),
+        height: LengthOrAuto::Px(100.0),
+        gap: 24.0,
+        justify_content: JustifyContent::FlexStart,
+        ..Default::default()
+    });
+
+    for _ in 0..3 {
+        let mut child = LayoutBox::new(BoxType::AnonymousBlock);
+        child.style = Some(ComputedStyle {
+            display: Display::Block,
+            width: LengthOrAuto::Px(80.0),
+            height: LengthOrAuto::Px(40.0),
+            ..Default::default()
+        });
+        container.children.push(child);
+    }
+
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 400.0, 0.0));
+    container.layout(cb);
+
+    // Item 0 at 0.
+    // Item 1 at 80 + 24 = 104.
+    // Item 2 at 104 + 80 + 24 = 208.
+    assert_eq!(container.children[0].dimensions.content.x, 0.0);
+    assert_eq!(container.children[1].dimensions.content.x, 104.0);
+    assert_eq!(container.children[2].dimensions.content.x, 208.0);
+}
+
+#[test]
+fn test_flex_column_layout_and_align_items_center() {
+    let mut container = LayoutBox::new(BoxType::AnonymousBlock);
+    container.style = Some(ComputedStyle {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Column,
+        width: LengthOrAuto::Px(300.0),
+        height: LengthOrAuto::Px(300.0),
+        gap: 10.0,
+        justify_content: JustifyContent::FlexStart,
+        align_items: AlignItems::Center,
+        ..Default::default()
+    });
+
+    let mut c1 = LayoutBox::new(BoxType::AnonymousBlock);
+    c1.style = Some(ComputedStyle {
+        display: Display::Block,
+        width: LengthOrAuto::Px(100.0),
+        height: LengthOrAuto::Px(50.0),
+        ..Default::default()
+    });
+
+    let mut c2 = LayoutBox::new(BoxType::AnonymousBlock);
+    c2.style = Some(ComputedStyle {
+        display: Display::Block,
+        width: LengthOrAuto::Px(160.0),
+        height: LengthOrAuto::Px(60.0),
+        ..Default::default()
+    });
+
+    container.children.push(c1);
+    container.children.push(c2);
+
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 300.0, 0.0));
+    container.layout(cb);
+
+    // c1: centered horizontally: (300 - 100) / 2 = 100. y = 0.
+    assert_eq!(container.children[0].dimensions.content.x, 100.0);
+    assert_eq!(container.children[0].dimensions.content.y, 0.0);
+
+    // c2: centered horizontally: (300 - 160) / 2 = 70. y = 50 + 10 = 60.
+    assert_eq!(container.children[1].dimensions.content.x, 70.0);
+    assert_eq!(container.children[1].dimensions.content.y, 60.0);
+}
+
+#[test]
+fn test_flexbox_demo_html_tree_layout() {
+    let html = r#"<html>
+      <body style="padding: 20px;">
+        <nav style="display: flex; justify-content: space-between; align-items: center; padding: 16px 24px; margin-bottom: 24px;">
+          <h2 style="font-size: 20px; margin: 0;">lilies</h2>
+          <div style="display: flex; gap: 16px;">
+            <span>Home</span>
+            <span>Docs</span>
+            <span>GitHub</span>
+          </div>
+        </nav>
+        <div style="display: flex; justify-content: space-between; gap: 20px;">
+          <div style="flex-grow: 1; padding: 20px;">
+            <h3>Card One</h3>
+            <p>First flex item.</p>
+          </div>
+          <div style="flex-grow: 1; padding: 20px;">
+            <h3>Card Two</h3>
+            <p>Second flex item.</p>
+          </div>
+        </div>
+      </body>
+    </html>"#;
+
+    let doc = parse_html(html);
+    let styles = lilies_css::compute_styles_for_document(&doc);
+    let html_id = doc.get_children(doc.root()).into_iter().find(|&id| {
+        doc.node(id)
+            .and_then(|n| n.as_element())
+            .is_some_and(|el| el.tag_name() == "html")
+    }).expect("html");
+
+    let mut layout_tree = build_layout_tree(html_id, doc.arena(), &styles).expect("layout tree");
+    crate::layout(&mut layout_tree, Dimensions::new(Rect::new(0.0, 0.0, 800.0, 600.0)));
+
+    let body = &layout_tree.children[0];
+    let nav = &body.children[0];
+    assert_eq!(nav.children.len(), 2);
+
+    let h2 = &nav.children[0];
+    let nav_links = &nav.children[1];
+
+    // h2 at left, links at right (space-between)
+    assert!(h2.dimensions.content.x < nav_links.dimensions.content.x);
+    assert_eq!(nav_links.children.len(), 3);
+    assert!(nav_links.children[0].dimensions.content.x < nav_links.children[1].dimensions.content.x);
+    assert!(nav_links.children[1].dimensions.content.x < nav_links.children[2].dimensions.content.x);
+
+    let cards_grid = &body.children[1];
+    assert_eq!(cards_grid.children.len(), 2);
+    let card1 = &cards_grid.children[0];
+    let card2 = &cards_grid.children[1];
+
+    // Both cards should have positive grown width, side-by-side
+    assert!(card1.dimensions.content.width > 200.0);
+    assert!(card2.dimensions.content.width > 200.0);
+    assert!(card1.dimensions.content.x < card2.dimensions.content.x);
+    assert_eq!(card1.dimensions.content.y, card2.dimensions.content.y);
 }

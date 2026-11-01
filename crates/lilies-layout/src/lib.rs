@@ -12,7 +12,7 @@ pub use error::LayoutError;
 pub use font::{default_font, wrap_text, TextLine};
 pub use hit_test::{find_parent_link, hit_test};
 pub use layout_box::{BoxType, LayoutBox};
-pub use lilies_css::TextAlign;
+pub use lilies_css::{AlignItems, FlexDirection, JustifyContent, TextAlign};
 pub use lilies_net::DecodedImage;
 pub use tree_builder::{
     build_layout_tree, build_layout_tree_with_cache, build_layout_tree_with_images,

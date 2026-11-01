@@ -177,7 +177,7 @@ pub fn build_layout_tree_with_images(
             }
 
             let box_type = match style.display {
-                Display::Block => BoxType::BlockNode(node_id),
+                Display::Block | Display::Flex => BoxType::BlockNode(node_id),
                 Display::Inline => BoxType::InlineNode(node_id),
                 Display::None => return None,
             };
@@ -229,11 +229,12 @@ pub fn build_layout_tree_with_images(
     }
 
     // CSS Normalization: if a block box has any block children, all children must be block.
-    // Wrap consecutive inline children into AnonymousBlock boxes.
+    // Wrap consecutive inline children into AnonymousBlock boxes (except in flex containers, where all items are flex items).
+    let is_flex = style.as_ref().is_some_and(|s| s.display == Display::Flex);
     let has_block = raw_children.iter().any(|c| c.is_block());
     let has_inline = raw_children.iter().any(|c| c.is_inline());
 
-    let children = if has_block && has_inline {
+    let children = if !is_flex && has_block && has_inline {
         let mut normalized = Vec::new();
         let mut inline_run = Vec::new();
 

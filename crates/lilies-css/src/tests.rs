@@ -1,6 +1,9 @@
 #![deny(unsafe_code)]
 
-use crate::{compute_styles, matches, parse_stylesheet, Color, Display, LengthOrAuto, Specificity};
+use crate::{
+    compute_styles, matches, parse_stylesheet, AlignItems, Color, Display, FlexDirection,
+    JustifyContent, LengthOrAuto, Specificity,
+};
 use lilies_dom::{Document, IndexMap};
 
 #[test]
@@ -391,4 +394,56 @@ fn test_resolve_em_and_rem_to_concrete_pixels() {
     assert_eq!(child_style.margin_left, LengthOrAuto::Px(40.0));
     // text-align inherited from parent
     assert_eq!(child_style.text_align, TextAlign::Center);
+}
+
+#[test]
+fn test_flexbox_css_properties_parsing_and_computing() {
+    let mut doc = Document::new();
+    let root = doc.root();
+
+    let mut nav_attrs = IndexMap::new();
+    nav_attrs.insert("class".to_string(), "navbar".to_string());
+    let nav = doc.create_element("nav", nav_attrs);
+    doc.append_child(root, nav).unwrap();
+
+    let mut item_attrs = IndexMap::new();
+    item_attrs.insert("class".to_string(), "item".to_string());
+    let item = doc.create_element("div", item_attrs);
+    doc.append_child(nav, item).unwrap();
+
+    let css = r#"
+        .navbar {
+            display: flex;
+            flex-direction: row;
+            justify-content: space-between;
+            align-items: center;
+            gap: 1.5rem;
+        }
+        .item {
+            flex-grow: 2.5;
+            gap: 10px;
+        }
+        .col-container {
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: flex-end;
+            gap: 2em;
+        }
+    "#;
+    let stylesheet = parse_stylesheet(css).unwrap();
+    let styles = compute_styles(&doc, &stylesheet);
+
+    let nav_style = styles.get(nav).expect("nav style");
+    assert_eq!(nav_style.display, Display::Flex);
+    assert_eq!(nav_style.flex_direction, FlexDirection::Row);
+    assert_eq!(nav_style.justify_content, JustifyContent::SpaceBetween);
+    assert_eq!(nav_style.align_items, AlignItems::Center);
+    // root font size is default 16px -> 1.5rem = 24px
+    assert_eq!(nav_style.gap, 24.0);
+    assert_eq!(nav_style.flex_grow, 0.0);
+
+    let item_style = styles.get(item).expect("item style");
+    assert_eq!(item_style.flex_grow, 2.5);
+    assert_eq!(item_style.gap, 10.0);
 }

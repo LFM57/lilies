@@ -47,6 +47,32 @@ pub const IMAGE_DEMO_HTML: &str = r#"<html>
   </body>
 </html>"#;
 
+pub const FLEX_DEMO_HTML: &str = r#"<html>
+  <body style="background-color: #0f172a; color: #f8fafc; font-family: sans-serif; padding: 20px;">
+    <!-- Flex Navbar -->
+    <nav style="display: flex; justify-content: space-between; align-items: center; background-color: #1e293b; padding: 16px 24px; margin-bottom: 24px;">
+      <h2 style="font-size: 20px; color: #38bdf8; margin: 0;">lilies</h2>
+      <div style="display: flex; gap: 16px;">
+        <span style="color: #94a3b8;">Home</span>
+        <span style="color: #94a3b8;">Docs</span>
+        <span style="color: #38bdf8;">GitHub</span>
+      </div>
+    </nav>
+
+    <!-- Flex Cards Grid -->
+    <div style="display: flex; justify-content: space-between; gap: 20px;">
+      <div style="flex-grow: 1; background-color: #1e293b; padding: 20px;">
+        <h3 style="color: #f1f5f9; font-size: 18px;">Card One</h3>
+        <p style="color: #94a3b8; font-size: 14px;">First flex item.</p>
+      </div>
+      <div style="flex-grow: 1; background-color: #1e293b; padding: 20px;">
+        <h3 style="color: #f1f5f9; font-size: 18px;">Card Two</h3>
+        <p style="color: #94a3b8; font-size: 14px;">Second flex item.</p>
+      </div>
+    </div>
+  </body>
+</html>"#;
+
 /// Re-runs the layout engine and rasterizer for the webpage given the viewport dimensions.
 pub fn render_to_pixmap(
     doc: &Document,
@@ -667,6 +693,12 @@ fn fetch_or_fallback(target: &str) -> (String, String) {
     }
     if target == "about:welcome" || target.is_empty() {
         return (DEFAULT_HTML.to_string(), "about:welcome".to_string());
+    }
+    if target == "about:flex" {
+        return (FLEX_DEMO_HTML.to_string(), "about:flex".to_string());
+    }
+    if target == "about:images" {
+        return (IMAGE_DEMO_HTML.to_string(), "about:images".to_string());
     }
 
     match lilies_net::fetch(target) {
@@ -1723,6 +1755,44 @@ mod tests {
         assert!(total_h > 100.0);
         assert_eq!(pixmap.width, 800);
         assert_eq!(pixmap.height, 600);
+    }
+
+    #[test]
+    fn test_milestone11_flex_demo_page_render_e2e() {
+        let (html, url) = fetch_or_fallback("about:flex");
+        assert_eq!(url, "about:flex");
+        assert!(html.contains("display: flex"));
+
+        let doc = parse_html(&html);
+        let styles = compute_styles_for_document(&doc);
+        let html_id = find_html_root(&doc).unwrap();
+
+        let (pixmap, total_h) = render_webpage_to_pixmap(
+            &doc,
+            html_id,
+            &styles,
+            800,
+            600,
+            0.0,
+        )
+        .expect("rendered flex webpage");
+
+        assert!(total_h > 100.0);
+        assert_eq!(pixmap.width, 800);
+        assert_eq!(pixmap.height, 600);
+
+        // Body background color #0f172a (r=15, g=23, b=42)
+        let body_pixel = pixmap.get_pixel(10, 10).expect("body pixel");
+        assert_eq!(body_pixel.r, 0x0f);
+        assert_eq!(body_pixel.g, 0x17);
+        assert_eq!(body_pixel.b, 0x2a);
+
+        // Navbar background color #1e293b (r=30, g=41, b=59)
+        // Body padding is 20px, navbar padding is 16px
+        let nav_pixel = pixmap.get_pixel(100, 30).expect("nav pixel");
+        assert_eq!(nav_pixel.r, 0x1e);
+        assert_eq!(nav_pixel.g, 0x29);
+        assert_eq!(nav_pixel.b, 0x3b);
     }
 
     #[test]

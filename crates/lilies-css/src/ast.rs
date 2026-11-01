@@ -37,6 +37,15 @@ impl Value {
         }
     }
 
+    /// Attempts to convert this value into a numeric float (for unitless numbers or flex-grow).
+    pub fn to_number(&self) -> Option<f32> {
+        match self {
+            Value::Length(num, _) => Some(*num),
+            Value::Keyword(k) => k.parse::<f32>().ok(),
+            _ => None,
+        }
+    }
+
     /// Converts this value into a pixel length using the provided element font size and root font size.
     pub fn to_length_with_context(&self, font_size: f32, root_font_size: f32) -> Option<f32> {
         match self {
