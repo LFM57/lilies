@@ -3,6 +3,7 @@
 use crate::display_item::{DisplayItem, DisplayList};
 use lilies_css::Color;
 use lilies_layout::{EdgeSizes, Rect};
+use lilies_net::DecodedImage;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -302,6 +303,78 @@ fn draw_text(pixmap: &mut Pixmap, text: &str, rect: Rect, color: Color, font_siz
     }
 }
 
+/// Renders an image scaled to `rect` with nearest-neighbor sampling,
+/// Porter-Duff Source-Over alpha blending, and viewport clipping.
+pub fn draw_image(pixmap: &mut Pixmap, rect: Rect, image: &DecodedImage) {
+    if rect.width <= 0.0 || rect.height <= 0.0 || image.width == 0 || image.height == 0 {
+        return;
+    }
+
+    let x0 = rect.x.floor() as i64;
+    let y0 = rect.y.floor() as i64;
+    let x1 = (rect.x + rect.width).ceil() as i64;
+    let y1 = (rect.y + rect.height).ceil() as i64;
+
+    let min_x = x0.max(0).min(pixmap.width as i64) as u32;
+    let max_x = x1.max(0).min(pixmap.width as i64) as u32;
+    let min_y = y0.max(0).min(pixmap.height as i64) as u32;
+    let max_y = y1.max(0).min(pixmap.height as i64) as u32;
+
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    let pw = pixmap.width as usize;
+    let img_w = image.width as f32;
+    let img_h = image.height as f32;
+
+    for y in min_y..max_y {
+        let v = (((y as f32 + 0.5) - rect.y) / rect.height) * img_h;
+        let src_y = (v.floor() as i64).clamp(0, image.height as i64 - 1) as u32;
+
+        for x in min_x..max_x {
+            let u = (((x as f32 + 0.5) - rect.x) / rect.width) * img_w;
+            let src_x = (u.floor() as i64).clamp(0, image.width as i64 - 1) as u32;
+
+            let src_idx = ((src_y * image.width + src_x) * 4) as usize;
+            if src_idx + 3 >= image.pixels.len() {
+                continue;
+            }
+
+            let src_color = Color::rgba(
+                image.pixels[src_idx],
+                image.pixels[src_idx + 1],
+                image.pixels[src_idx + 2],
+                image.pixels[src_idx + 3],
+            );
+
+            if src_color.a == 0 {
+                continue;
+            }
+
+            let dst_idx = (y as usize * pw + x as usize) * 4;
+            if src_color.a == 255 {
+                pixmap.pixels[dst_idx] = src_color.r;
+                pixmap.pixels[dst_idx + 1] = src_color.g;
+                pixmap.pixels[dst_idx + 2] = src_color.b;
+                pixmap.pixels[dst_idx + 3] = 255;
+            } else {
+                let dest = Color::rgba(
+                    pixmap.pixels[dst_idx],
+                    pixmap.pixels[dst_idx + 1],
+                    pixmap.pixels[dst_idx + 2],
+                    pixmap.pixels[dst_idx + 3],
+                );
+                let blended = blend_pixel(src_color, dest);
+                pixmap.pixels[dst_idx] = blended.r;
+                pixmap.pixels[dst_idx + 1] = blended.g;
+                pixmap.pixels[dst_idx + 2] = blended.b;
+                pixmap.pixels[dst_idx + 3] = blended.a;
+            }
+        }
+    }
+}
+
 /// Rasterizes a display list onto the target pixmap.
 pub fn rasterize(display_list: &DisplayList, pixmap: &mut Pixmap) {
     for item in display_list {
@@ -323,6 +396,9 @@ pub fn rasterize(display_list: &DisplayList, pixmap: &mut Pixmap) {
                 font_size,
             } => {
                 draw_text(pixmap, text, *rect, *color, *font_size);
+            }
+            DisplayItem::Image { rect, image } => {
+                draw_image(pixmap, *rect, image);
             }
         }
     }

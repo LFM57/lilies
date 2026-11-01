@@ -16,3 +16,6 @@ winit = "0.29"
 softbuffer = "0.4"
 url.workspace = true
 
+[dev-dependencies]
+image.workspace = true
+

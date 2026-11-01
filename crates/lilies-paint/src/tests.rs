@@ -458,3 +458,112 @@ fn test_display_list_text_generation() {
         }
     );
 }
+
+#[test]
+fn test_image_rasterization_alpha_blending() {
+    let mut pixmap = Pixmap::new(3, 1, Color::rgb(0, 0, 255)); // Blue background
+    let img = std::sync::Arc::new(crate::DecodedImage::new(
+        3,
+        1,
+        vec![
+            255, 0, 0, 0,   // Pixel 0: Transparent Red
+            255, 0, 0, 255, // Pixel 1: Opaque Red
+            255, 0, 0, 128, // Pixel 2: ~50% Alpha Red
+        ],
+    ));
+
+    let mut display_list = DisplayList::new();
+    display_list.push(DisplayItem::Image {
+        rect: Rect::new(0.0, 0.0, 3.0, 1.0),
+        image: img,
+    });
+
+    rasterize(&display_list, &mut pixmap);
+
+    // Pixel 0: Transparent pixel did not overwrite blue background
+    let p0 = pixmap.get_pixel(0, 0).unwrap();
+    assert_eq!(p0, Color::rgb(0, 0, 255));
+
+    // Pixel 1: Opaque red completely overwrote blue background
+    let p1 = pixmap.get_pixel(1, 0).unwrap();
+    assert_eq!(p1, Color::rgb(255, 0, 0));
+
+    // Pixel 2: Blended red over blue
+    let p2 = pixmap.get_pixel(2, 0).unwrap();
+    assert!(p2.r > 100);
+    assert!(p2.b > 100);
+    assert_eq!(p2.g, 0);
+    assert_eq!(p2.a, 255);
+}
+
+#[test]
+fn test_image_rasterization_clipping_bounds() {
+    let mut pixmap = Pixmap::new(20, 20, Color::BLACK);
+    let img = std::sync::Arc::new(crate::DecodedImage::new(
+        10,
+        10,
+        [255, 0, 0, 255].repeat(100),
+    ));
+
+    // 1. Completely off-screen top-left
+    let mut list = DisplayList::new();
+    list.push(DisplayItem::Image {
+        rect: Rect::new(-50.0, -50.0, 10.0, 10.0),
+        image: std::sync::Arc::clone(&img),
+    });
+    rasterize(&list, &mut pixmap);
+
+    // 2. Completely off-screen bottom-right
+    let mut list = DisplayList::new();
+    list.push(DisplayItem::Image {
+        rect: Rect::new(100.0, 100.0, 10.0, 10.0),
+        image: std::sync::Arc::clone(&img),
+    });
+    rasterize(&list, &mut pixmap);
+
+    // Pixmap should still be completely black
+    for y in 0..20 {
+        for x in 0..20 {
+            assert_eq!(pixmap.get_pixel(x, y).unwrap(), Color::BLACK);
+        }
+    }
+
+    // 3. Partially off-screen top-left: rect from -5 to +5 in both x and y
+    let mut list = DisplayList::new();
+    list.push(DisplayItem::Image {
+        rect: Rect::new(-5.0, -5.0, 10.0, 10.0),
+        image: std::sync::Arc::clone(&img),
+    });
+    rasterize(&list, &mut pixmap);
+
+    // Visible portion [0..5, 0..5] must be Red
+    for y in 0..5 {
+        for x in 0..5 {
+            assert_eq!(pixmap.get_pixel(x, y).unwrap(), Color::rgb(255, 0, 0));
+        }
+    }
+
+    // Pixels outside [0..5, 0..5] must still be Black
+    assert_eq!(pixmap.get_pixel(10, 10).unwrap(), Color::BLACK);
+    assert_eq!(pixmap.get_pixel(19, 19).unwrap(), Color::BLACK);
+}
+
+#[test]
+fn test_image_display_item_in_display_list_and_offset() {
+    let img = std::sync::Arc::new(crate::DecodedImage::new(50, 50, vec![0; 50 * 50 * 4]));
+    let mut img_box = LayoutBox::new(BoxType::ImageNode(NodeId(9), img));
+    img_box.dimensions.content = Rect::new(10.0, 20.0, 50.0, 50.0);
+
+    let mut list = build_display_list(&img_box);
+    assert_eq!(list.len(), 1);
+
+    match &list.items[0] {
+        DisplayItem::Image { rect, .. } => {
+            assert_eq!(*rect, Rect::new(10.0, 20.0, 50.0, 50.0));
+        }
+        other => panic!("Expected DisplayItem::Image, got {:?}", other),
+    }
+
+    list.offset(5.0, 10.0);
+    assert_eq!(list.items[0].rect(), Rect::new(15.0, 30.0, 50.0, 50.0));
+}

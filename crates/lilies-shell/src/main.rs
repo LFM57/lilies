@@ -4,8 +4,10 @@ use lilies_css::StyleTree;
 use lilies_dom::{Document, NodeId};
 use lilies_html::{load_styles_with_external, parse_html};
 use lilies_layout::{
-    build_layout_tree, find_parent_link, hit_test, layout, Dimensions, EdgeSizes, LayoutBox, Rect,
+    build_layout_tree_with_cache, find_parent_link, hit_test, layout, Dimensions, EdgeSizes,
+    LayoutBox, Rect,
 };
+use lilies_net::ImageCache;
 use lilies_paint::{build_display_list, rasterize, Color, DisplayItem, DisplayList, Pixmap};
 use softbuffer::{Context, Surface};
 use std::num::NonZeroU32;
@@ -30,6 +32,17 @@ pub const DEFAULT_HTML: &str = r#"<html>
           This text is automatically wrapped and rendered with pure software alpha blending.
         </p>
       </div>
+    </div>
+  </body>
+</html>"#;
+
+pub const IMAGE_DEMO_HTML: &str = r#"<html>
+  <body style="background-color: #24273a; color: #cad3f5; font-size: 16px;">
+    <div style="max-width: 650px; margin: 40px auto; padding: 24px; background-color: #1e2030; text-align: center;">
+      <h1 style="color: #8aadf4; font-size: 28px;">lilies with Images</h1>
+      <p style="margin-bottom: 20px;">Testing replaced element layout and PNG alpha transparency:</p>
+      <img src="https://upload.wikimedia.org/wikipedia/commons/d/d5/Rust_programming_language_black_logo.png" alt="Rust Logo" width="120" style="margin: 10px auto;" />
+      <p style="margin-top: 16px; font-size: 14px; color: #a5adcb;">The image preserves aspect ratio and scales smoothly.</p>
     </div>
   </body>
 </html>"#;
@@ -59,17 +72,19 @@ pub fn render_webpage_to_pixmap(
         .map(|(pixmap, h, _)| (pixmap, h))
 }
 
-/// Builds, lays out, and rasterizes the webpage given the viewport dimensions and scroll offset.
+/// Builds, lays out, and rasterizes the webpage given the viewport dimensions, scroll offset, and image cache.
 /// Returns the rendered `Pixmap`, `total_content_height`, and the laid-out `LayoutBox`.
-pub fn render_webpage_with_layout(
+pub fn render_webpage_with_images(
     doc: &Document,
     html_id: NodeId,
     styles: &StyleTree,
     width: u32,
     height: u32,
     scroll_offset_y: f32,
+    image_cache: &ImageCache,
 ) -> Option<(Pixmap, f32, LayoutBox)> {
-    let mut root_box = build_layout_tree(html_id, doc.arena(), styles)?;
+    let mut root_box =
+        build_layout_tree_with_cache(html_id, doc.arena(), styles, image_cache)?;
     let viewport = Dimensions::new(Rect::new(0.0, 0.0, width as f32, height as f32));
     layout(&mut root_box, viewport);
 
@@ -104,6 +119,27 @@ pub fn render_webpage_with_layout(
     let mut pixmap = Pixmap::new(width, height, bg_color);
     rasterize(&display_list, &mut pixmap);
     Some((pixmap, total_content_height, root_box))
+}
+
+/// Builds, lays out, and rasterizes the webpage given the viewport dimensions and scroll offset.
+/// Returns the rendered `Pixmap`, `total_content_height`, and the laid-out `LayoutBox`.
+pub fn render_webpage_with_layout(
+    doc: &Document,
+    html_id: NodeId,
+    styles: &StyleTree,
+    width: u32,
+    height: u32,
+    scroll_offset_y: f32,
+) -> Option<(Pixmap, f32, LayoutBox)> {
+    render_webpage_with_images(
+        doc,
+        html_id,
+        styles,
+        width,
+        height,
+        scroll_offset_y,
+        &ImageCache::new(),
+    )
 }
 
 /// Renders the complete window frame including the address bar at the top and the webpage below it.
@@ -150,12 +186,51 @@ pub fn render_window_pixmap_interactive(
     address_input_buffer: &str,
     cursor_position: usize,
 ) -> Option<(Pixmap, LayoutBox)> {
+    render_window_pixmap_interactive_with_cache(
+        doc,
+        html_id,
+        styles,
+        width,
+        height,
+        current_url,
+        scroll_offset_y,
+        total_content_height,
+        is_address_bar_focused,
+        address_input_buffer,
+        cursor_position,
+        &ImageCache::new(),
+    )
+}
+
+/// Renders the complete window frame with interactive address bar state and an image cache.
+#[allow(clippy::too_many_arguments)]
+pub fn render_window_pixmap_interactive_with_cache(
+    doc: &Document,
+    html_id: NodeId,
+    styles: &StyleTree,
+    width: u32,
+    height: u32,
+    current_url: &str,
+    scroll_offset_y: &mut f32,
+    total_content_height: &mut f32,
+    is_address_bar_focused: bool,
+    address_input_buffer: &str,
+    cursor_position: usize,
+    image_cache: &ImageCache,
+) -> Option<(Pixmap, LayoutBox)> {
     let mut window_pixmap = Pixmap::new(width, height, Color::rgb(0x18, 0x18, 0x25));
 
     let page_height = height.saturating_sub(TOOLBAR_HEIGHT);
     let layout_box = if page_height > 0 && width > 0 {
-        let (page_pixmap, content_h, lbox) =
-            render_webpage_with_layout(doc, html_id, styles, width, page_height, *scroll_offset_y)?;
+        let (page_pixmap, content_h, lbox) = render_webpage_with_images(
+            doc,
+            html_id,
+            styles,
+            width,
+            page_height,
+            *scroll_offset_y,
+            image_cache,
+        )?;
         *total_content_height = content_h;
         let max_scroll = (content_h - page_height as f32).max(0.0);
         *scroll_offset_y = scroll_offset_y.clamp(0.0, max_scroll);
@@ -165,7 +240,8 @@ pub fn render_window_pixmap_interactive(
     } else {
         *total_content_height = 0.0;
         *scroll_offset_y = 0.0;
-        let mut empty_box = build_layout_tree(html_id, doc.arena(), styles)?;
+        let mut empty_box =
+            build_layout_tree_with_cache(html_id, doc.arena(), styles, image_cache)?;
         let viewport = Dimensions::new(Rect::new(0.0, 0.0, width as f32, page_height as f32));
         layout(&mut empty_box, viewport);
         empty_box
@@ -282,11 +358,55 @@ pub fn normalize_address_input(input: &str) -> String {
     }
 }
 
+/// Finds all `<img src="...">` elements in the document.
+pub fn find_image_elements(doc: &Document) -> Vec<(String, NodeId)> {
+    let mut images = Vec::new();
+    collect_image_elements(doc, doc.root(), &mut images);
+    images
+}
+
+fn collect_image_elements(doc: &Document, node_id: NodeId, images: &mut Vec<(String, NodeId)>) {
+    if let Some(node) = doc.node(node_id) {
+        if let Some(el) = node.as_element() {
+            if el.tag_name().eq_ignore_ascii_case("img") {
+                if let Some(src) = el.get_attribute("src") {
+                    let trimmed = src.trim();
+                    if !trimmed.is_empty() {
+                        images.push((trimmed.to_string(), node_id));
+                    }
+                }
+            }
+        }
+    }
+
+    for child in doc.get_children(node_id) {
+        collect_image_elements(doc, child, images);
+    }
+}
+
+/// Scans the document for all `<img>` tags, resolves `src` against `base_url`,
+/// and fetches/decodes all images into `cache` before layout.
+pub fn load_images_for_document(doc: &Document, base_url: &str, cache: &ImageCache) {
+    let images = find_image_elements(doc);
+    for (src, _) in images {
+        let resolved = resolve_url(base_url, &src);
+        match cache.fetch_and_cache(&resolved) {
+            Ok(img) => {
+                cache.insert(src, img);
+            }
+            Err(e) => {
+                eprintln!("Failed to fetch or decode image '{}': {}", resolved, e);
+            }
+        }
+    }
+}
+
 /// Shell state holding browser DOM, styles, navigation history, and interactive UI state.
 pub struct ShellState {
     pub current_url: String,
     pub doc: Document,
     pub styles: StyleTree,
+    pub image_cache: ImageCache,
     pub html_id: NodeId,
     pub current_layout_box: Option<LayoutBox>,
     pub scroll_offset_y: f32,
@@ -308,6 +428,8 @@ impl ShellState {
         let (html_content, current_url) = fetch_or_fallback(&initial_target);
         let doc = parse_html(&html_content);
         let styles = load_styles_with_external(&doc, &current_url);
+        let image_cache = ImageCache::new();
+        load_images_for_document(&doc, &current_url, &image_cache);
         let html_id = find_html_root(&doc).expect("Root <html> element required in document");
 
         Self {
@@ -318,6 +440,7 @@ impl ShellState {
             current_url,
             doc,
             styles,
+            image_cache,
             html_id,
             current_layout_box: None,
             scroll_offset_y: 0.0,
@@ -333,6 +456,7 @@ impl ShellState {
         let (html_content, loaded_url) = fetch_or_fallback(target_url);
         let doc = parse_html(&html_content);
         let styles = load_styles_with_external(&doc, &loaded_url);
+        load_images_for_document(&doc, &loaded_url, &self.image_cache);
         let Some(html_id) = find_html_root(&doc) else {
             eprintln!("Document missing <html> root element");
             return;
@@ -464,7 +588,7 @@ fn render_frame(
 
     surface.resize(w, h)?;
 
-    let (pixmap, layout_box) = render_window_pixmap_interactive(
+    let (pixmap, layout_box) = render_window_pixmap_interactive_with_cache(
         &state.doc,
         state.html_id,
         &state.styles,
@@ -476,6 +600,7 @@ fn render_frame(
         state.is_address_bar_focused,
         &state.address_input_buffer,
         state.cursor_position,
+        &state.image_cache,
     )
     .ok_or("Failed to build layout tree from root")?;
 
@@ -732,6 +857,7 @@ mod tests {
     use lilies_css::{
         compute_styles, compute_styles_for_document, parse_styles_from_document, StyleSheet,
     };
+    use lilies_layout::build_layout_tree;
 
     #[test]
     fn test_copy_pixmap_to_softbuffer() {
@@ -1355,5 +1481,115 @@ mod tests {
         let _ = fs::remove_file(css_file);
         let _ = fs::remove_file(html_file);
         let _ = fs::remove_dir(temp_dir);
+    }
+
+    #[test]
+    fn test_find_image_elements_in_document() {
+        let html = r#"<html>
+            <body>
+                <img src="first.png" />
+                <div><img src="  second.jpg  " /></div>
+                <img /> <!-- No src -->
+            </body>
+        </html>"#;
+        let doc = parse_html(html);
+        let images = find_image_elements(&doc);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].0, "first.png");
+        assert_eq!(images[1].0, "second.jpg");
+    }
+
+    #[test]
+    fn test_shell_image_loading_and_e2e_render() {
+        use std::fs;
+        let temp_dir = std::env::temp_dir().join(format!("lilies_img_test_{}", std::process::id()));
+        fs::create_dir_all(&temp_dir).expect("create temp dir");
+
+        // Create a 2x2 red PNG
+        let mut img = image::RgbaImage::new(2, 2);
+        for p in img.pixels_mut() {
+            *p = image::Rgba([255, 0, 0, 255]);
+        }
+        let img_path = temp_dir.join("red.png");
+        let mut cursor = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut cursor, image::ImageFormat::Png).unwrap();
+        fs::write(&img_path, cursor.into_inner()).expect("write png");
+
+        let html_content = r#"<html>
+            <body style="background-color: #000000; margin: 0px; padding: 0px;">
+                <img src="red.png" width="40" height="40" style="margin: 0px;" />
+            </body>
+        </html>"#;
+        let html_path = temp_dir.join("index.html");
+        fs::write(&html_path, html_content).expect("write html");
+
+        let target_url = format!("file://{}", html_path.display());
+        let state = ShellState::new(target_url);
+
+        let mut scroll = 0.0;
+        let mut total_h = 0.0;
+        let (window_pixmap, lbox) = render_window_pixmap_interactive_with_cache(
+            &state.doc,
+            state.html_id,
+            &state.styles,
+            200,
+            200,
+            &state.current_url,
+            &mut scroll,
+            &mut total_h,
+            false,
+            &state.current_url,
+            0,
+            &state.image_cache,
+        )
+        .expect("render window pixmap");
+
+        assert!(lbox.dimensions.content.width > 0.0);
+
+        // Top toolbar is 36px high. At y = 36..76 and x = 0..40, pixels should be red!
+        let pixel = window_pixmap.get_pixel(10, TOOLBAR_HEIGHT + 10).unwrap();
+        assert_eq!(pixel, Color::rgb(255, 0, 0));
+
+        // Outside image (e.g. x = 60, y = 36 + 10) should be body background (black)
+        let bg_pixel = window_pixmap.get_pixel(60, TOOLBAR_HEIGHT + 10).unwrap();
+        assert_eq!(bg_pixel, Color::BLACK);
+
+        let _ = fs::remove_file(img_path);
+        let _ = fs::remove_file(html_path);
+        let _ = fs::remove_dir(temp_dir);
+    }
+
+    #[test]
+    fn test_milestone10_demo_page_render_with_aspect_ratio_and_transparency() {
+        let doc = parse_html(IMAGE_DEMO_HTML);
+        let styles = compute_styles_for_document(&doc);
+        let html_id = find_html_root(&doc).unwrap();
+
+        let image_cache = ImageCache::new();
+        // Insert a 200x100 half-transparent green image for the Rust logo URL
+        let mut pixels = Vec::with_capacity(200 * 100 * 4);
+        for _ in 0..(200 * 100) {
+            pixels.extend_from_slice(&[0, 255, 0, 128]);
+        }
+        let decoded = std::sync::Arc::new(lilies_net::DecodedImage::new(200, 100, pixels));
+        image_cache.insert(
+            "https://upload.wikimedia.org/wikipedia/commons/d/d5/Rust_programming_language_black_logo.png",
+            decoded,
+        );
+
+        let (pixmap, total_h, _root_box) = render_webpage_with_images(
+            &doc,
+            html_id,
+            &styles,
+            800,
+            600,
+            0.0,
+            &image_cache,
+        )
+        .expect("rendered webpage");
+
+        assert!(total_h > 100.0);
+        assert_eq!(pixmap.width, 800);
+        assert_eq!(pixmap.height, 600);
     }
 }

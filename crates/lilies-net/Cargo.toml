@@ -7,3 +7,4 @@ license.workspace = true
 [dependencies]
 ureq = { version = "2.10", default-features = false, features = ["tls", "gzip"] }
 thiserror.workspace = true
+image.workspace = true

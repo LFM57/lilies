@@ -8,6 +8,62 @@ use std::time::Duration;
 pub const USER_AGENT: &str = "lilies/0.1.0";
 pub const MAX_REDIRECTS: usize = 5;
 
+/// Fetches the resource specified by `url` as raw bytes.
+///
+/// Supported schemes:
+/// - `http://` and `https://`: Fetched over network using `ureq` with pure-Rust TLS,
+///   handling up to 5 HTTP redirects and setting User-Agent `"lilies/0.1.0"`.
+/// - `file://` or local file paths: Read directly from local filesystem.
+pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, NetError> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(NetError::InvalidUrl("URL cannot be empty".to_string()));
+    }
+
+    if let Some((scheme, rest)) = trimmed.split_once("://") {
+        match scheme.to_ascii_lowercase().as_str() {
+            "http" | "https" => fetch_http_bytes(trimmed),
+            "file" => fetch_file_bytes(rest),
+            unsupported => Err(NetError::UnsupportedScheme(unsupported.to_string())),
+        }
+    } else {
+        // No scheme specified: treat as local filesystem path
+        fetch_local_path_bytes(trimmed)
+    }
+}
+
+fn fetch_http_bytes(url: &str) -> Result<Vec<u8>, NetError> {
+    let agent = ureq::AgentBuilder::new()
+        .redirects(MAX_REDIRECTS as u32)
+        .user_agent(USER_AGENT)
+        .timeout(Duration::from_secs(30))
+        .build();
+
+    let response = agent.get(url).call()?;
+    let mut reader = response.into_reader();
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut reader, &mut bytes)?;
+    Ok(bytes)
+}
+
+fn fetch_file_bytes(path_str: &str) -> Result<Vec<u8>, NetError> {
+    let path_str = if let Some(stripped) = path_str.strip_prefix("localhost/") {
+        format!("/{}", stripped)
+    } else if let Some(stripped) = path_str.strip_prefix("localhost") {
+        stripped.to_string()
+    } else {
+        path_str.to_string()
+    };
+
+    let decoded = percent_decode(&path_str);
+    fetch_local_path_bytes(&decoded)
+}
+
+fn fetch_local_path_bytes(path_str: &str) -> Result<Vec<u8>, NetError> {
+    let path = Path::new(path_str);
+    fs::read(path).map_err(NetError::Io)
+}
+
 /// Fetches the resource specified by `url`.
 ///
 /// Supported schemes:

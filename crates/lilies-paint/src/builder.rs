@@ -3,13 +3,16 @@
 use crate::display_item::{DisplayItem, DisplayList};
 use lilies_css::Color;
 use lilies_layout::LayoutBox;
+use std::sync::Arc;
 
 /// Constructs a `DisplayList` by traversing a `LayoutBox` tree following CSS 2.1 paint order.
 ///
 /// Paint order for each box:
 /// 1. Background (`dimensions.padding_box()`)
-/// 2. Borders (`dimensions.border_box()`)
-/// 3. Children (front to back)
+/// 2. Image (`dimensions.content`)
+/// 3. Borders (`dimensions.border_box()`)
+/// 4. Text
+/// 5. Children (front to back)
 pub fn build_display_list(layout_root: &LayoutBox) -> DisplayList {
     let mut display_list = DisplayList::new();
     render_layout_box(layout_root, &mut display_list);
@@ -18,11 +21,24 @@ pub fn build_display_list(layout_root: &LayoutBox) -> DisplayList {
 
 fn render_layout_box(layout_box: &LayoutBox, list: &mut DisplayList) {
     render_background(layout_box, list);
+    render_image(layout_box, list);
     render_borders(layout_box, list);
     render_text(layout_box, list);
 
     for child in &layout_box.children {
         render_layout_box(child, list);
+    }
+}
+
+fn render_image(layout_box: &LayoutBox, list: &mut DisplayList) {
+    if let Some(image) = layout_box.image() {
+        let content_box = layout_box.dimensions.content;
+        if content_box.width > 0.0 && content_box.height > 0.0 {
+            list.push(DisplayItem::Image {
+                rect: content_box,
+                image: Arc::clone(image),
+            });
+        }
     }
 }
 

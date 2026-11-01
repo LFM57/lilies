@@ -2,6 +2,8 @@
 
 use lilies_css::Color;
 use lilies_layout::{EdgeSizes, Rect};
+use lilies_net::DecodedImage;
+use std::sync::Arc;
 
 /// A single rendering primitive in the display list.
 #[derive(Debug, Clone, PartialEq)]
@@ -21,21 +23,21 @@ pub enum DisplayItem {
         color: Color,
         font_size: f32,
     },
+    /// A decoded bitmap image scaled to fit `rect`.
+    Image {
+        rect: Rect,
+        image: Arc<DecodedImage>,
+    },
 }
 
 impl DisplayItem {
     /// Translates the display item by (dx, dy).
     pub fn offset(&mut self, dx: f32, dy: f32) {
         match self {
-            DisplayItem::SolidColor { rect, .. } => {
-                rect.x += dx;
-                rect.y += dy;
-            }
-            DisplayItem::Border { rect, .. } => {
-                rect.x += dx;
-                rect.y += dy;
-            }
-            DisplayItem::Text { rect, .. } => {
+            DisplayItem::SolidColor { rect, .. }
+            | DisplayItem::Border { rect, .. }
+            | DisplayItem::Text { rect, .. }
+            | DisplayItem::Image { rect, .. } => {
                 rect.x += dx;
                 rect.y += dy;
             }
@@ -45,9 +47,10 @@ impl DisplayItem {
     /// Returns the bounding rectangle of this display item.
     pub fn rect(&self) -> Rect {
         match self {
-            DisplayItem::SolidColor { rect, .. } => *rect,
-            DisplayItem::Border { rect, .. } => *rect,
-            DisplayItem::Text { rect, .. } => *rect,
+            DisplayItem::SolidColor { rect, .. }
+            | DisplayItem::Border { rect, .. }
+            | DisplayItem::Text { rect, .. }
+            | DisplayItem::Image { rect, .. } => *rect,
         }
     }
 }

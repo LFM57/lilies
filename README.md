@@ -46,6 +46,7 @@ cargo run -p lilies-shell -- file:///path/to/page.html
 - **📦 CSS Box Model**: Block Formatting Context (BFC) with horizontal margins, padding, border calculations, centering with `margin: auto`, and `max-width` clamping.
 - **🔤 Typography & Alignment**: Glyph text measurement and line wrapping via `fontdue`, multi-line reflow, line-height calculation, and `text-align` (`left`, `center`, `right`).
 - **🖌️ Display List & Alpha Blending**: Display list IR intermediate compilation, software rasterizer with per-pixel alpha blending, background color rendering, and softbuffer frame presentation.
+- **🖼️ Image Rendering & Replaced Element Layout (`<img>`)**: Binary asset fetching (`png`, `jpeg`, `webp`, `gif`), thread-safe image caching (`ImageCache`), replaced element layout with intrinsic aspect ratio preservation (`width`, `height`, `max-width`), and Porter-Duff Source-Over alpha blending with viewport clipping.
 - **🖱️ Interactive Browser Shell**:
   - URL address bar with click-to-focus, text cursor, and full typing/backspace editing.
   - Hyperlink hit-testing with dynamic pointer cursor and one-click navigation.

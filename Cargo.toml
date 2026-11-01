@@ -21,6 +21,7 @@ thiserror = "2.0"
 indexmap = "2.7"
 fontdue = "0.9"
 url = "2.5"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
 lilies-dom = { path = "crates/lilies-dom" }
 lilies-html = { path = "crates/lilies-html" }
 lilies-css = { path = "crates/lilies-css" }

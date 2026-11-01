@@ -7,6 +7,7 @@ license.workspace = true
 [dependencies]
 lilies-layout.workspace = true
 lilies-css.workspace = true
+lilies-net.workspace = true
 fontdue.workspace = true
 thiserror.workspace = true
 

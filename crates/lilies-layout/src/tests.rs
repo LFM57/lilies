@@ -4,7 +4,7 @@ use crate::{build_layout_tree, layout, BoxType, Dimensions, EdgeSizes, LayoutBox
 use lilies_css::{
     compute_styles, parse_stylesheet, ComputedStyle, Display, LengthOrAuto, StyleTree,
 };
-use lilies_dom::{Document, IndexMap};
+use lilies_dom::{Document, IndexMap, NodeId};
 use lilies_html::parse_html;
 
 #[test]
@@ -892,4 +892,169 @@ fn test_text_align_center_and_right_line_coordinate_positioning() {
     assert_eq!(box_left.lines.len(), 1);
     let line_left = &box_left.lines[0];
     assert_eq!(line_left.rect.x, cb.content.x);
+}
+
+#[test]
+fn test_image_layout_aspect_ratio_explicit_width() {
+    let img = std::sync::Arc::new(crate::DecodedImage::new(200, 100, vec![0; 200 * 100 * 4]));
+    let style = ComputedStyle {
+        width: lilies_css::LengthOrAuto::Px(100.0),
+        height: lilies_css::LengthOrAuto::Auto,
+        ..Default::default()
+    };
+    let mut img_box = LayoutBox::new(BoxType::ImageNode(NodeId(1), img)).with_style(style);
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 500.0, 500.0));
+    img_box.layout(cb);
+
+    assert_eq!(img_box.dimensions.content.width, 100.0);
+    assert_eq!(img_box.dimensions.content.height, 50.0);
+}
+
+#[test]
+fn test_image_layout_aspect_ratio_explicit_height() {
+    let img = std::sync::Arc::new(crate::DecodedImage::new(200, 100, vec![0; 200 * 100 * 4]));
+    let style = ComputedStyle {
+        width: lilies_css::LengthOrAuto::Auto,
+        height: lilies_css::LengthOrAuto::Px(80.0),
+        ..Default::default()
+    };
+    let mut img_box = LayoutBox::new(BoxType::ImageNode(NodeId(1), img)).with_style(style);
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 500.0, 500.0));
+    img_box.layout(cb);
+
+    assert_eq!(img_box.dimensions.content.width, 160.0);
+    assert_eq!(img_box.dimensions.content.height, 80.0);
+}
+
+#[test]
+fn test_image_layout_both_explicit_dimensions() {
+    let img = std::sync::Arc::new(crate::DecodedImage::new(200, 100, vec![0; 200 * 100 * 4]));
+    let style = ComputedStyle {
+        width: lilies_css::LengthOrAuto::Px(150.0),
+        height: lilies_css::LengthOrAuto::Px(150.0),
+        ..Default::default()
+    };
+    let mut img_box = LayoutBox::new(BoxType::ImageNode(NodeId(1), img)).with_style(style);
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 500.0, 500.0));
+    img_box.layout(cb);
+
+    assert_eq!(img_box.dimensions.content.width, 150.0);
+    assert_eq!(img_box.dimensions.content.height, 150.0);
+}
+
+#[test]
+fn test_image_layout_intrinsic_dimensions_when_neither_specified() {
+    let img = std::sync::Arc::new(crate::DecodedImage::new(200, 100, vec![0; 200 * 100 * 4]));
+    let style = ComputedStyle {
+        width: lilies_css::LengthOrAuto::Auto,
+        height: lilies_css::LengthOrAuto::Auto,
+        ..Default::default()
+    };
+    let mut img_box = LayoutBox::new(BoxType::ImageNode(NodeId(1), img)).with_style(style);
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 500.0, 500.0));
+    img_box.layout(cb);
+
+    assert_eq!(img_box.dimensions.content.width, 200.0);
+    assert_eq!(img_box.dimensions.content.height, 100.0);
+}
+
+#[test]
+fn test_image_layout_max_width_preserves_aspect_ratio() {
+    let img = std::sync::Arc::new(crate::DecodedImage::new(400, 200, vec![0; 400 * 200 * 4]));
+    let style = ComputedStyle {
+        width: lilies_css::LengthOrAuto::Px(400.0),
+        height: lilies_css::LengthOrAuto::Auto,
+        max_width: Some(250.0),
+        ..Default::default()
+    };
+    let mut img_box = LayoutBox::new(BoxType::ImageNode(NodeId(1), img)).with_style(style);
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 500.0, 500.0));
+    img_box.layout(cb);
+
+    assert_eq!(img_box.dimensions.content.width, 250.0);
+    assert_eq!(img_box.dimensions.content.height, 125.0);
+}
+
+#[test]
+fn test_image_layout_margin_auto_horizontal_centering() {
+    let img = std::sync::Arc::new(crate::DecodedImage::new(200, 100, vec![0; 200 * 100 * 4]));
+    let style = ComputedStyle {
+        width: lilies_css::LengthOrAuto::Px(200.0),
+        height: lilies_css::LengthOrAuto::Px(100.0),
+        margin_left: lilies_css::LengthOrAuto::Auto,
+        margin_right: lilies_css::LengthOrAuto::Auto,
+        ..Default::default()
+    };
+    let mut img_box = LayoutBox::new(BoxType::ImageNode(NodeId(1), img)).with_style(style);
+    let cb = Dimensions::new(Rect::new(0.0, 0.0, 600.0, 400.0));
+    img_box.layout(cb);
+
+    assert_eq!(img_box.dimensions.content.width, 200.0);
+    assert_eq!(img_box.dimensions.margin.left, 200.0);
+    assert_eq!(img_box.dimensions.margin.right, 200.0);
+    assert_eq!(img_box.dimensions.content.x, 200.0);
+}
+
+#[test]
+fn test_build_layout_tree_with_image_cache_and_html_attributes() {
+    let doc = parse_html(r#"<html><body><img src="https://example.com/logo.png" width="120" /></body></html>"#);
+    let html_id = doc.get_children(doc.root()).into_iter().find(|&id| {
+        doc.node(id)
+            .and_then(|n| n.as_element())
+            .is_some_and(|el| el.tag_name() == "html")
+    }).expect("html");
+
+    let mut cache = std::collections::HashMap::new();
+    let img_data = std::sync::Arc::new(crate::DecodedImage::new(240, 120, vec![0; 240 * 120 * 4]));
+    cache.insert("https://example.com/logo.png".to_string(), img_data);
+
+    let style_tree = lilies_css::compute_styles_for_document(&doc);
+    let layout_tree = crate::tree_builder::build_layout_tree_with_images(
+        html_id,
+        doc.arena(),
+        &style_tree,
+        &cache,
+    )
+    .expect("layout tree");
+
+    // Traversal: html -> body -> img (or anonymous block)
+    let body_box = &layout_tree.children[0];
+    let img_box = if body_box.children[0].is_image() {
+        &body_box.children[0]
+    } else {
+        &body_box.children[0].children[0]
+    };
+    assert!(img_box.is_image());
+    assert_eq!(img_box.dimensions.content.width, 120.0);
+    assert_eq!(img_box.dimensions.content.height, 60.0); // 120 * (120/240) = 60.0
+}
+
+#[test]
+fn test_missing_image_fallback_to_alt_text() {
+    let doc = parse_html(r#"<html><body><img src="missing.png" alt="Fallback Alt" /></body></html>"#);
+    let html_id = doc.get_children(doc.root()).into_iter().find(|&id| {
+        doc.node(id)
+            .and_then(|n| n.as_element())
+            .is_some_and(|el| el.tag_name() == "html")
+    }).expect("html");
+
+    let cache = std::collections::HashMap::new();
+    let style_tree = lilies_css::compute_styles_for_document(&doc);
+    let layout_tree = crate::tree_builder::build_layout_tree_with_images(
+        html_id,
+        doc.arena(),
+        &style_tree,
+        &cache,
+    )
+    .expect("layout tree");
+
+    let body_box = &layout_tree.children[0];
+    let fallback = if body_box.children[0].text.is_some() {
+        &body_box.children[0]
+    } else {
+        &body_box.children[0].children[0]
+    };
+    assert_eq!(fallback.text.as_deref(), Some("Fallback Alt"));
+    assert!(fallback.dimensions.content.width > 0.0);
+    assert!(fallback.dimensions.content.height > 0.0);
 }
