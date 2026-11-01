@@ -20,6 +20,7 @@ license = "MIT OR Apache-2.0"
 thiserror = "2.0"
 indexmap = "2.7"
 fontdue = "0.9"
+url = "2.5"
 lilies-dom = { path = "crates/lilies-dom" }
 lilies-html = { path = "crates/lilies-html" }
 lilies-css = { path = "crates/lilies-css" }

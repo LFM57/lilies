@@ -73,10 +73,9 @@ fn percent_decode(input: &str) -> String {
             let h1 = chars.next();
             let h2 = chars.next();
             if let (Some(c1), Some(c2)) = (h1, h2) {
-                if let Ok(val) = u8::from_str_radix(
-                    std::str::from_utf8(&[c1, c2]).unwrap_or_default(),
-                    16,
-                ) {
+                if let Ok(val) =
+                    u8::from_str_radix(std::str::from_utf8(&[c1, c2]).unwrap_or_default(), 16)
+                {
                     bytes.push(val);
                     continue;
                 }

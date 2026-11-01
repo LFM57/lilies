@@ -657,3 +657,115 @@ fn test_text_node_layout_and_height_calculation() {
         );
     }
 }
+
+#[test]
+fn test_hit_testing_nested_boxes() {
+    use crate::hit_test::hit_test;
+    use lilies_dom::NodeId;
+
+    let id_root = NodeId(1);
+    let id_child1 = NodeId(2);
+    let id_child2 = NodeId(3);
+    let id_grandchild = NodeId(4);
+
+    let mut grandchild = LayoutBox::new(BoxType::InlineNode(id_grandchild));
+    grandchild.dimensions = Dimensions::new(Rect::new(20.0, 20.0, 50.0, 30.0));
+
+    let mut child1 = LayoutBox::new(BoxType::BlockNode(id_child1));
+    child1.dimensions = Dimensions::new(Rect::new(10.0, 10.0, 150.0, 100.0));
+    child1.children.push(grandchild);
+
+    let mut child2 = LayoutBox::new(BoxType::BlockNode(id_child2));
+    child2.dimensions = Dimensions::new(Rect::new(200.0, 10.0, 150.0, 100.0));
+
+    let mut root = LayoutBox::new(BoxType::BlockNode(id_root));
+    root.dimensions = Dimensions::new(Rect::new(0.0, 0.0, 400.0, 300.0));
+    root.children.push(child1);
+    root.children.push(child2);
+
+    // 1. Point inside innermost grandchild
+    assert_eq!(hit_test(&root, 30.0, 30.0), Some(id_grandchild));
+
+    // 2. Point inside child1 but outside grandchild
+    assert_eq!(hit_test(&root, 15.0, 15.0), Some(id_child1));
+
+    // 3. Point inside child2
+    assert_eq!(hit_test(&root, 250.0, 50.0), Some(id_child2));
+
+    // 4. Point inside root margin/padding outside children
+    assert_eq!(hit_test(&root, 5.0, 5.0), Some(id_root));
+
+    // 5. Point completely outside root
+    assert_eq!(hit_test(&root, 500.0, 500.0), None);
+}
+
+#[test]
+fn test_hit_testing_topmost_overlapping_boxes() {
+    use crate::hit_test::hit_test;
+    use lilies_dom::NodeId;
+
+    let id_root = NodeId(1);
+    let id_first = NodeId(2);
+    let id_second = NodeId(3);
+
+    let mut first = LayoutBox::new(BoxType::BlockNode(id_first));
+    first.dimensions = Dimensions::new(Rect::new(10.0, 10.0, 100.0, 100.0));
+
+    let mut second = LayoutBox::new(BoxType::BlockNode(id_second));
+    second.dimensions = Dimensions::new(Rect::new(50.0, 50.0, 100.0, 100.0));
+
+    let mut root = LayoutBox::new(BoxType::BlockNode(id_root));
+    root.dimensions = Dimensions::new(Rect::new(0.0, 0.0, 300.0, 300.0));
+    root.children.push(first);
+    root.children.push(second);
+
+    // Point in overlap region (60, 60): second is painted later (topmost), so it must be hit
+    assert_eq!(hit_test(&root, 60.0, 60.0), Some(id_second));
+
+    // Point in only first region (20, 20): hits first
+    assert_eq!(hit_test(&root, 20.0, 20.0), Some(id_first));
+}
+
+#[test]
+fn test_find_parent_link_traversal() {
+    use crate::hit_test::find_parent_link;
+
+    let html =
+        r#"<div><p><a href="https://example.com/about"><span>Click here</span></a></p></div>"#;
+    let doc = parse_html(html);
+
+    // Find span, a, and p nodes
+    let mut span_id = None;
+    let mut a_id = None;
+    let mut p_id = None;
+
+    for node in doc.arena().iter() {
+        if let Some(el) = node.as_element() {
+            match el.tag_name() {
+                "span" => span_id = Some(node.id),
+                "a" => a_id = Some(node.id),
+                "p" => p_id = Some(node.id),
+                _ => {}
+            }
+        }
+    }
+
+    let span_id = span_id.expect("span element");
+    let a_id = a_id.expect("a element");
+    let p_id = p_id.expect("p element");
+
+    // Enclosing link from grandchild span
+    assert_eq!(
+        find_parent_link(span_id, doc.arena()),
+        Some("https://example.com/about".to_string())
+    );
+
+    // Link from anchor itself
+    assert_eq!(
+        find_parent_link(a_id, doc.arena()),
+        Some("https://example.com/about".to_string())
+    );
+
+    // Paragraph does not have an enclosing link
+    assert_eq!(find_parent_link(p_id, doc.arena()), None);
+}

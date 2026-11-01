@@ -112,6 +112,11 @@ impl LayoutBox {
         self.box_type.node_id()
     }
 
+    /// Performs hit-testing to find the innermost DOM `NodeId` under coordinate `(x, y)`.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<NodeId> {
+        crate::hit_test::hit_test(self, x, y)
+    }
+
     /// Recursively lays out this box and all of its descendants within the containing block.
     pub fn layout(&mut self, containing_block: Dimensions) {
         match self.box_type {
@@ -374,8 +379,12 @@ impl LayoutBox {
         if !self.children.is_empty() {
             let mut total_h = 0.0f32;
             let mut max_w = 0.0f32;
+            let mut child_cb = self.dimensions;
+            if child_cb.content.width == 0.0 {
+                child_cb.content.width = containing_block.content.width;
+            }
             for child in &mut self.children {
-                child.layout(self.dimensions);
+                child.layout(child_cb);
                 total_h += child.dimensions.margin_box().height;
                 max_w = max_w.max(child.dimensions.margin_box().width);
             }

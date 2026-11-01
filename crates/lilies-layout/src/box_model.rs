@@ -19,6 +19,11 @@ impl Rect {
             height,
         }
     }
+
+    /// Returns true if the point (x, y) lies within this rectangle (inclusive boundaries).
+    pub fn contains(&self, x: f32, y: f32) -> bool {
+        x >= self.x && x <= self.x + self.width && y >= self.y && y <= self.y + self.height
+    }
 }
 
 /// Represents the sizes of the four edges of a box (top, right, bottom, left).

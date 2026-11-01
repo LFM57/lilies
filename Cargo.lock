@@ -880,6 +880,7 @@ dependencies = [
  "lilies-paint",
  "softbuffer",
  "thiserror 2.0.21",
+ "url",
  "winit",
 ]
 

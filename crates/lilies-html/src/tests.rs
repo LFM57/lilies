@@ -186,11 +186,7 @@ fn test_style_tag_extraction_and_application() {
         }
     }
 
-    let h1_id = elements
-        .iter()
-        .find(|(_, tag, _)| tag == "h1")
-        .unwrap()
-        .0;
+    let h1_id = elements.iter().find(|(_, tag, _)| tag == "h1").unwrap().0;
     let h1_style = styles.get(h1_id).expect("h1 style");
     assert_eq!(h1_style.color, lilies_css::Color::rgb(255, 0, 0));
     assert_eq!(h1_style.font_size, 32.0);
@@ -242,7 +238,64 @@ fn test_multiple_style_blocks_and_cascade_order() {
 
     let div_style = styles.get(div_id).unwrap();
     // Later <style> block in body wins over earlier <style> block in head
-    assert_eq!(div_style.background_color, lilies_css::Color::rgb(0, 0, 255));
+    assert_eq!(
+        div_style.background_color,
+        lilies_css::Color::rgb(0, 0, 255)
+    );
     // Property from earlier block is preserved
     assert_eq!(div_style.width, lilies_css::LengthOrAuto::Px(100.0));
+}
+
+#[test]
+fn test_paragraph_auto_closing_produces_sibling_paragraphs() {
+    let input = "<p>first<p>second";
+    let doc = parse_html(input);
+    let root = doc.root();
+    let children = doc.get_children(root);
+    assert_eq!(
+        children.len(),
+        2,
+        "Expected two top-level sibling paragraph nodes"
+    );
+
+    let p1_id = children[0];
+    let p2_id = children[1];
+
+    let p1 = doc.node(p1_id).and_then(|n| n.as_element()).unwrap();
+    let p2 = doc.node(p2_id).and_then(|n| n.as_element()).unwrap();
+    assert_eq!(p1.tag_name(), "p");
+    assert_eq!(p2.tag_name(), "p");
+
+    let p1_children = doc.get_children(p1_id);
+    assert_eq!(p1_children.len(), 1);
+    let p1_text = doc.node(p1_children[0]).and_then(|n| n.as_text()).unwrap();
+    assert_eq!(p1_text.data, "first");
+
+    let p2_children = doc.get_children(p2_id);
+    assert_eq!(p2_children.len(), 1);
+    let p2_text = doc.node(p2_children[0]).and_then(|n| n.as_text()).unwrap();
+    assert_eq!(p2_text.data, "second");
+}
+
+#[test]
+fn test_paragraph_with_anchor_wraps_text_children() {
+    let input = r#"<p><a href="https://example.com">Learn more...</a></p>"#;
+    let doc = parse_html(input);
+    let root = doc.root();
+    let children = doc.get_children(root);
+    assert_eq!(children.len(), 1);
+
+    let p_id = children[0];
+    let p_children = doc.get_children(p_id);
+    assert_eq!(p_children.len(), 1);
+
+    let a_id = p_children[0];
+    let a_elem = doc.node(a_id).and_then(|n| n.as_element()).unwrap();
+    assert_eq!(a_elem.tag_name(), "a");
+    assert_eq!(a_elem.get_attribute("href"), Some("https://example.com"));
+
+    let a_children = doc.get_children(a_id);
+    assert_eq!(a_children.len(), 1);
+    let text = doc.node(a_children[0]).and_then(|n| n.as_text()).unwrap();
+    assert_eq!(text.data, "Learn more...");
 }
