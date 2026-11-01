@@ -1,0 +1,9 @@
+[package]
+name = "lilies-dom"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+indexmap.workspace = true

@@ -1,0 +1,9 @@
+[package]
+name = "lilies-paint"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lilies-layout.workspace = true
+thiserror.workspace = true

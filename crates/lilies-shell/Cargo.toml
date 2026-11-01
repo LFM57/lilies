@@ -1,0 +1,13 @@
+[package]
+name = "lilies-shell"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lilies-dom.workspace = true
+lilies-html.workspace = true
+lilies-css.workspace = true
+lilies-layout.workspace = true
+lilies-paint.workspace = true
+thiserror.workspace = true

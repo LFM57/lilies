@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/lilies-dom",
+    "crates/lilies-html",
+    "crates/lilies-css",
+    "crates/lilies-layout",
+    "crates/lilies-paint",
+    "crates/lilies-shell",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["lilies developers"]
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+thiserror = "2.0"
+indexmap = "2.7"
+lilies-dom = { path = "crates/lilies-dom" }
+lilies-html = { path = "crates/lilies-html" }
+lilies-css = { path = "crates/lilies-css" }
+lilies-layout = { path = "crates/lilies-layout" }
+lilies-paint = { path = "crates/lilies-paint" }
