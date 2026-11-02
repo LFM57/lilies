@@ -253,6 +253,52 @@ pub fn render_window_pixmap_interactive(
     )
 }
 
+/// Renders the complete window frame with interactive address bar state, loading progress, and link hover preview.
+#[allow(clippy::too_many_arguments)]
+pub fn render_window_pixmap_full(
+    doc: &Document,
+    html_id: NodeId,
+    styles: &StyleTree,
+    width: u32,
+    height: u32,
+    current_url: &str,
+    scroll_offset_y: &mut f32,
+    total_content_height: &mut f32,
+    is_address_bar_focused: bool,
+    address_input_buffer: &str,
+    cursor_position: usize,
+    image_cache: &ImageCache,
+    is_loading: bool,
+    loading_progress: f32,
+    hovered_link: Option<&str>,
+    mouse_pos: (f64, f64),
+) -> Option<(Pixmap, LayoutBox)> {
+    let (mut window_pixmap, layout_box) = render_window_pixmap_interactive_with_cache(
+        doc,
+        html_id,
+        styles,
+        width,
+        height,
+        current_url,
+        scroll_offset_y,
+        total_content_height,
+        is_address_bar_focused,
+        address_input_buffer,
+        cursor_position,
+        image_cache,
+    )?;
+
+    if is_loading {
+        render_loading_bar(&mut window_pixmap, width, loading_progress);
+    }
+
+    if let Some(link) = hovered_link {
+        render_link_preview(&mut window_pixmap, link, width, height, mouse_pos);
+    }
+
+    Some((window_pixmap, layout_box))
+}
+
 /// Renders the complete window frame with interactive address bar state and an image cache.
 #[allow(clippy::too_many_arguments)]
 pub fn render_window_pixmap_interactive_with_cache(
@@ -387,6 +433,115 @@ pub fn render_address_bar(
     });
 
     rasterize(&bar_list, pixmap);
+}
+
+/// Renders a modern browser loading bar across the bottom edge of the toolbar.
+pub fn render_loading_bar(pixmap: &mut Pixmap, width: u32, progress: f32) {
+    if progress <= 0.0 || width == 0 {
+        return;
+    }
+
+    let bar_height = 3.0;
+    let bar_y = (TOOLBAR_HEIGHT as f32) - bar_height;
+    let clamped_progress = progress.clamp(0.0, 1.0);
+    let fill_width = (width as f32 * clamped_progress).max(1.0);
+
+    let mut list = DisplayList::new();
+
+    // 1. Subtle background track along the bottom of the toolbar
+    list.push(DisplayItem::SolidColor {
+        rect: Rect::new(0.0, bar_y, width as f32, bar_height),
+        color: Color::rgb(0x31, 0x32, 0x44), // Catppuccin surface track
+    });
+
+    // 2. Active loading progress fill
+    list.push(DisplayItem::SolidColor {
+        rect: Rect::new(0.0, bar_y, fill_width, bar_height),
+        color: Color::rgb(0x89, 0xb4, 0xfa), // Catppuccin blue
+    });
+
+    // 3. Highlighted leading edge glow tip for modern polish
+    if fill_width >= 4.0 && clamped_progress < 1.0 {
+        list.push(DisplayItem::SolidColor {
+            rect: Rect::new(fill_width - 4.0, bar_y, 4.0, bar_height),
+            color: Color::rgb(0xb4, 0xbe, 0xfe), // Catppuccin lavender highlight
+        });
+    }
+
+    rasterize(&list, pixmap);
+}
+
+/// Renders a modern status preview pill in the bottom-left corner showing the URL when hovering a link.
+/// If the mouse cursor is located in the bottom-left corner, it flips to the bottom-right corner.
+pub fn render_link_preview(
+    pixmap: &mut Pixmap,
+    url: &str,
+    width: u32,
+    height: u32,
+    mouse_pos: (f64, f64),
+) {
+    if url.is_empty() || width < 120 || height < (TOOLBAR_HEIGHT + 40) {
+        return;
+    }
+
+    let font_size = 12.0;
+    let padding_x = 8.0;
+    let pill_height = 22.0;
+    let max_pill_width = (width as f32 - 24.0).max(60.0);
+    let max_text_width = max_pill_width - padding_x * 2.0;
+
+    let mut display_text = url.to_string();
+    if lilies_layout::font::measure_text(&display_text, font_size) > max_text_width {
+        while !display_text.is_empty()
+            && lilies_layout::font::measure_text(&format!("{}…", display_text), font_size)
+                > max_text_width
+        {
+            display_text.pop();
+        }
+        display_text.push('…');
+    }
+
+    let text_w = lilies_layout::font::measure_text(&display_text, font_size);
+    let pill_width = (text_w + padding_x * 2.0).clamp(40.0, max_pill_width);
+
+    let (mx, my) = (mouse_pos.0 as f32, mouse_pos.1 as f32);
+    let in_bottom_left = mx < (pill_width + 16.0) && my > (height as f32 - pill_height - 16.0);
+    let pill_x = if in_bottom_left {
+        (width as f32 - pill_width - 4.0).max(0.0)
+    } else {
+        4.0
+    };
+    let pill_y = (height as f32 - pill_height - 4.0).max(TOOLBAR_HEIGHT as f32);
+
+    let mut list = DisplayList::new();
+
+    // 1. Dark pill background
+    list.push(DisplayItem::SolidColor {
+        rect: Rect::new(pill_x, pill_y, pill_width, pill_height),
+        color: Color::rgba(0x18, 0x18, 0x25, 0xf4),
+    });
+
+    // 2. Subtle pill border
+    list.push(DisplayItem::Border {
+        rect: Rect::new(pill_x, pill_y, pill_width, pill_height),
+        widths: EdgeSizes::new(1.0, 1.0, 1.0, 1.0),
+        color: Color::rgb(0x45, 0x47, 0x5a),
+    });
+
+    // 3. Link destination URL text
+    list.push(DisplayItem::Text {
+        text: display_text,
+        rect: Rect::new(
+            pill_x + padding_x,
+            pill_y + 3.0,
+            pill_width - padding_x * 2.0,
+            14.0,
+        ),
+        color: Color::rgb(0xcd, 0xd6, 0xf4),
+        font_size,
+    });
+
+    rasterize(&list, pixmap);
 }
 
 /// Resolves a potentially relative `href` against the `base_url`.
@@ -572,12 +727,22 @@ pub struct ShellState {
 
     pub mouse_pos: (f64, f64),
     pub alt_pressed: bool,
+    pub ctrl_pressed: bool,
 
     pub cached_page: Option<CachedPage>,
     pub cached_window: Option<Pixmap>,
 
     pub js_runtime: JsRuntime,
     pub stylesheet_cache: std::collections::HashMap<String, String>,
+
+    /// Whether a page is currently loading.
+    pub is_loading: bool,
+    /// Loading progress from 0.0 (started) to 1.0 (completed).
+    pub loading_progress: f32,
+    /// Currently hovered link URL (resolved to full URL), if any.
+    pub hovered_link: Option<String>,
+    /// Last rendered hovered link URL, used to determine cache invalidation for hover tooltip.
+    pub last_rendered_hovered_link: Option<String>,
 }
 
 impl ShellState {
@@ -614,37 +779,95 @@ impl ShellState {
             is_address_bar_focused: false,
             mouse_pos: (0.0, 0.0),
             alt_pressed: false,
+            ctrl_pressed: false,
             cached_page: None,
             cached_window: None,
             js_runtime,
             stylesheet_cache,
+            is_loading: false,
+            loading_progress: 0.0,
+            hovered_link: None,
+            last_rendered_hovered_link: None,
+        }
+    }
+
+    /// Marks the start of page loading with an initial progress value.
+    pub fn start_loading(&mut self, target_url: &str) {
+        self.is_loading = true;
+        self.loading_progress = 0.20;
+        self.address_input_buffer = target_url.to_string();
+        self.cursor_position = self.address_input_buffer.len();
+        self.hovered_link = None;
+        self.cached_window = None;
+    }
+
+    /// Sets the current loading progress in range [0.0, 1.0].
+    pub fn set_loading_progress(&mut self, progress: f32) {
+        self.loading_progress = progress.clamp(0.0, 1.0);
+        self.cached_window = None;
+    }
+
+    /// Completes the loading process, setting progress to 1.0.
+    pub fn finish_loading(&mut self) {
+        self.loading_progress = 1.0;
+        self.is_loading = true; // Kept true so the full loading bar is rendered on presentation
+        self.cached_window = None;
+    }
+
+    /// Sets the currently hovered link URL and returns `true` if the state changed.
+    pub fn set_hovered_link(&mut self, link: Option<String>) -> bool {
+        if self.hovered_link != link {
+            self.hovered_link = link;
+            true
+        } else {
+            false
         }
     }
 
     pub fn navigate(&mut self, target_url: &str, push_history: bool) {
         println!("Navigating to: {}", target_url);
+        self.start_loading(target_url);
+
         let (html_content, loaded_url) = fetch_or_fallback(target_url);
-        let doc = parse_html(&html_content);
-        let mut styles = load_styles_with_cache(&doc, &loaded_url, &mut self.stylesheet_cache);
+        self.set_loading_progress(0.40);
+
+        self.apply_loaded_page(&html_content, &loaded_url, push_history);
+    }
+
+    /// Applies newly loaded HTML content and base URL to the browser state.
+    pub fn apply_loaded_page(
+        &mut self,
+        html_content: &str,
+        loaded_url: &str,
+        push_history: bool,
+    ) {
+        let doc = parse_html(html_content);
+        let mut styles = load_styles_with_cache(&doc, loaded_url, &mut self.stylesheet_cache);
+        self.set_loading_progress(0.65);
 
         let mut js_runtime = JsRuntime::new(doc);
-        run_scripts_for_document(&mut js_runtime, &loaded_url);
+        run_scripts_for_document(&mut js_runtime, loaded_url);
         if js_runtime.take_dirty() {
             styles =
-                load_styles_with_cache(&js_runtime.doc(), &loaded_url, &mut self.stylesheet_cache);
+                load_styles_with_cache(&js_runtime.doc(), loaded_url, &mut self.stylesheet_cache);
         }
+        self.set_loading_progress(0.80);
+
         let doc = js_runtime.doc().clone();
         self.image_cache.clear();
-        load_images_for_document(&doc, &loaded_url, &self.image_cache);
+        load_images_for_document(&doc, loaded_url, &self.image_cache);
+        self.set_loading_progress(0.95);
+
         let Some(html_id) = find_html_root(&doc) else {
             eprintln!("Document missing <html> root element");
+            self.is_loading = false;
             return;
         };
 
         self.doc = doc;
         self.styles = styles;
         self.html_id = html_id;
-        self.current_url = loaded_url;
+        self.current_url = loaded_url.to_string();
         self.js_runtime = js_runtime;
         self.address_input_buffer = self.current_url.clone();
         self.cursor_position = self.address_input_buffer.len();
@@ -658,6 +881,8 @@ impl ShellState {
             self.history.push(self.current_url.clone());
             self.history_index = self.history.len() - 1;
         }
+
+        self.finish_loading();
     }
 
     pub fn handle_click_on_node(&mut self, hit_id: NodeId) -> bool {
@@ -686,6 +911,23 @@ impl ShellState {
         } else {
             false
         }
+    }
+
+    pub fn go_forward(&mut self) -> bool {
+        if self.history_index + 1 < self.history.len() {
+            self.history_index += 1;
+            let next_url = self.history[self.history_index].clone();
+            self.navigate(&next_url, false);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn reload(&mut self) {
+        let url = self.current_url.clone();
+        self.stylesheet_cache.remove(&url);
+        self.navigate(&url, false);
     }
 
     pub fn handle_char_input(&mut self, text: &str) {
@@ -812,6 +1054,11 @@ impl ShellState {
                 window_pixmap.blit(&cached.pixmap, 0, TOOLBAR_HEIGHT);
             }
             self.cached_window = Some(window_pixmap);
+        } else if self.hovered_link.is_some() || self.last_rendered_hovered_link.is_some() {
+            // Restore clean page pixels when hover overlay is or was active
+            if let (Some(win), Some(cached)) = (&mut self.cached_window, &self.cached_page) {
+                win.blit(&cached.pixmap, 0, TOOLBAR_HEIGHT);
+            }
         }
 
         // 3. Render address bar onto cached_window (extremely fast <0.1ms)
@@ -829,6 +1076,21 @@ impl ShellState {
                 self.is_address_bar_focused,
                 self.cursor_position,
             );
+
+            // 4. Render loading bar if page is loading
+            if self.is_loading {
+                render_loading_bar(window_pixmap, width, self.loading_progress);
+            }
+
+            // 5. Render link hover preview in bottom-left corner
+            if let Some(ref link) = self.hovered_link {
+                render_link_preview(window_pixmap, link, width, height, self.mouse_pos);
+            }
+        }
+
+        self.last_rendered_hovered_link = self.hovered_link.clone();
+        if self.loading_progress >= 1.0 {
+            self.is_loading = false;
         }
 
         self.cached_window.as_ref()
@@ -996,11 +1258,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let hovered = hit_test(lbox, page_x, page_y);
                             let link =
                                 hovered.and_then(|id| find_parent_link(id, state.doc.arena()));
-                            if link.is_some() {
+                            let link_url = link.map(|h| resolve_url(&state.current_url, &h));
+                            if link_url.is_some() {
                                 window.set_cursor_icon(winit::window::CursorIcon::Pointer);
                             } else {
                                 window.set_cursor_icon(winit::window::CursorIcon::Default);
                             }
+                            state.set_hovered_link(link_url);
                         }
                     }
                     window.request_redraw();
@@ -1011,18 +1275,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mx = position.x as f32;
                 let my = position.y as f32;
 
+                let mut need_redraw = false;
+
                 if my < TOOLBAR_HEIGHT as f32 {
                     window.set_cursor_icon(winit::window::CursorIcon::Default);
+                    if state.set_hovered_link(None) {
+                        need_redraw = true;
+                    }
                 } else if let Some(ref lbox) = state.current_layout_box {
                     let page_x = mx;
                     let page_y = (my - TOOLBAR_HEIGHT as f32) + state.scroll_offset_y;
                     let hovered = hit_test(lbox, page_x, page_y);
                     let link = hovered.and_then(|id| find_parent_link(id, state.doc.arena()));
-                    if link.is_some() {
+                    let link_url = link.map(|h| resolve_url(&state.current_url, &h));
+                    if link_url.is_some() {
                         window.set_cursor_icon(winit::window::CursorIcon::Pointer);
                     } else {
                         window.set_cursor_icon(winit::window::CursorIcon::Default);
                     }
+                    if state.set_hovered_link(link_url) {
+                        need_redraw = true;
+                    } else if state.hovered_link.is_some() {
+                        // Mouse movement within hover region updates cursor-avoidance position
+                        need_redraw = true;
+                    }
+                } else if state.set_hovered_link(None) {
+                    need_redraw = true;
+                }
+
+                if need_redraw {
+                    window.request_redraw();
+                }
+            }
+            WindowEvent::CursorLeft { .. } => {
+                window.set_cursor_icon(winit::window::CursorIcon::Default);
+                if state.set_hovered_link(None) {
+                    window.request_redraw();
                 }
             }
             WindowEvent::MouseInput {
@@ -1049,6 +1337,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let link = hit.and_then(|id| find_parent_link(id, state.doc.arena()));
                         if let Some(href) = link {
                             let resolved = resolve_url(&state.current_url, &href);
+                            state.set_hovered_link(None);
+                            state.start_loading(&resolved);
+                            let size = window.inner_size();
+                            let _ = render_frame(&mut surface, &mut state, size.width, size.height);
                             state.navigate(&resolved, true);
                             window.request_redraw();
                         } else if let Some(hit_id) = hit {
@@ -1071,10 +1363,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Key::Named(NamedKey::Enter) => {
                             if state.is_address_bar_focused {
                                 let target = normalize_address_input(&state.address_input_buffer);
-                                state.navigate(&target, true);
                                 state.is_address_bar_focused = false;
+                                state.start_loading(&target);
+                                let size = window.inner_size();
+                                let _ = render_frame(&mut surface, &mut state, size.width, size.height);
+                                state.navigate(&target, true);
                                 window.request_redraw();
                             }
+                        }
+                        Key::Named(NamedKey::Escape) => {
+                            if state.is_address_bar_focused {
+                                state.is_address_bar_focused = false;
+                                state.address_input_buffer = state.current_url.clone();
+                                window.request_redraw();
+                            }
+                        }
+                        Key::Named(NamedKey::F5) => {
+                            state.reload();
+                            window.request_redraw();
                         }
                         Key::Named(NamedKey::Backspace) => {
                             if state.is_address_bar_focused {
@@ -1103,7 +1409,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Key::Named(NamedKey::ArrowRight) => {
-                            if state.is_address_bar_focused
+                            if state.alt_pressed {
+                                if state.go_forward() {
+                                    window.request_redraw();
+                                }
+                            } else if state.is_address_bar_focused
                                 && state.cursor_position < state.address_input_buffer.len()
                             {
                                 if let Some(ch) = state.address_input_buffer
@@ -1129,7 +1439,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                         Key::Character(s) => {
-                            if state.is_address_bar_focused {
+                            if state.ctrl_pressed && s.eq_ignore_ascii_case("r") {
+                                state.reload();
+                                window.request_redraw();
+                            } else if state.is_address_bar_focused {
                                 state.handle_char_input(s);
                                 window.request_redraw();
                             }
@@ -1153,6 +1466,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 state.alt_pressed = modifiers.state().alt_key();
+                state.ctrl_pressed = modifiers.state().control_key() || modifiers.state().super_key();
             }
             WindowEvent::RedrawRequested => {
                 let size = window.inner_size();
@@ -2209,5 +2523,223 @@ mod tests {
         let _ = fs::remove_file(img2_path);
         let _ = fs::remove_file(html_path);
         let _ = fs::remove_dir(temp_dir);
+    }
+
+    #[test]
+    fn test_loading_bar_rendering_dimensions_and_colors() {
+        let mut pixmap = Pixmap::new(800, 600, Color::BLACK);
+
+        // 1. Progress = 0.5: bar should cover half width
+        render_loading_bar(&mut pixmap, 800, 0.5);
+
+        let bar_y = TOOLBAR_HEIGHT - 2; // y = 34
+        let blue = Color::rgb(0x89, 0xb4, 0xfa);
+        let lavender = Color::rgb(0xb4, 0xbe, 0xfe);
+        let track = Color::rgb(0x31, 0x32, 0x44);
+
+        // Within filled portion (e.g. x = 100)
+        assert_eq!(pixmap.get_pixel(100, bar_y), Some(blue));
+
+        // Leading edge glow (fill_width = 400, glow is in 396..400)
+        assert_eq!(pixmap.get_pixel(398, bar_y), Some(lavender));
+
+        // Past filled portion (e.g. x = 500)
+        assert_eq!(pixmap.get_pixel(500, bar_y), Some(track));
+
+        // Below toolbar (y = 38): should remain black
+        assert_eq!(pixmap.get_pixel(100, TOOLBAR_HEIGHT + 2), Some(Color::BLACK));
+
+        // 2. Progress = 1.0: covers full width
+        let mut full_pixmap = Pixmap::new(800, 600, Color::BLACK);
+        render_loading_bar(&mut full_pixmap, 800, 1.0);
+        assert_eq!(full_pixmap.get_pixel(100, bar_y), Some(blue));
+        assert_eq!(full_pixmap.get_pixel(750, bar_y), Some(blue));
+
+        // 3. Progress = 0.0: does not alter pixmap
+        let mut zero_pixmap = Pixmap::new(800, 600, Color::BLACK);
+        render_loading_bar(&mut zero_pixmap, 800, 0.0);
+        assert_eq!(zero_pixmap.get_pixel(100, bar_y), Some(Color::BLACK));
+    }
+
+    #[test]
+    fn test_link_preview_rendering_position_and_styling() {
+        let mut pixmap = Pixmap::new(800, 600, Color::WHITE);
+        let target_url = "https://rust-lang.org/learn";
+
+        // Cursor at center (400, 300) -> pill stays at bottom-left
+        render_link_preview(&mut pixmap, target_url, 800, 600, (400.0, 300.0));
+
+        // Pill height = 22, bottom margin = 4 => y in 574..596
+        let border_color = Color::rgb(0x45, 0x47, 0x5a);
+        // Top-left border corner of pill is at x = 4, y = 574
+        assert_eq!(pixmap.get_pixel(4, 574), Some(border_color));
+
+        // Inside the pill (x = 10, y = 585): background or text (not white)
+        let inside_pixel = pixmap.get_pixel(10, 585).unwrap();
+        assert_ne!(inside_pixel, Color::WHITE);
+
+        // Outside the pill at the bottom-right (x = 750, y = 585): remains white
+        assert_eq!(pixmap.get_pixel(750, 585), Some(Color::WHITE));
+    }
+
+    #[test]
+    fn test_link_preview_cursor_avoidance_bottom_right() {
+        let mut pixmap = Pixmap::new(800, 600, Color::WHITE);
+        let target_url = "https://example.com/about";
+
+        // Place cursor directly inside the bottom-left area where pill would be
+        render_link_preview(&mut pixmap, target_url, 800, 600, (15.0, 585.0));
+
+        // Pill should have flipped to the bottom-right!
+        // Bottom-left area (x = 6, y = 585) must remain untouched (white)
+        assert_eq!(pixmap.get_pixel(6, 585), Some(Color::WHITE));
+
+        // Bottom-right area (x = 750, y = 585) should now contain the pill
+        let right_pixel = pixmap.get_pixel(750, 585).unwrap();
+        assert_ne!(right_pixel, Color::WHITE);
+    }
+
+    #[test]
+    fn test_link_preview_long_url_truncation() {
+        let mut pixmap = Pixmap::new(300, 200, Color::WHITE);
+        let long_url = "https://example.com/very/long/nested/path/that/exceeds/the/width/of/the/window/and/must/be/cleanly/truncated/with/ellipsis";
+
+        // Must not panic or write out of bounds
+        render_link_preview(&mut pixmap, long_url, 300, 200, (150.0, 100.0));
+        assert_eq!(pixmap.width, 300);
+        assert_eq!(pixmap.height, 200);
+
+        // Pill was drawn inside bounds
+        assert_ne!(pixmap.get_pixel(10, 185), Some(Color::WHITE));
+    }
+
+    #[test]
+    fn test_render_window_pixmap_full_with_loading_and_preview() {
+        let doc = parse_html("<html><body style=\"background-color: #ffffff;\"><p>Hello</p></body></html>");
+        let styles = compute_styles_for_document(&doc);
+        let html_id = find_html_root(&doc).unwrap();
+
+        let mut scroll = 0.0;
+        let mut total_h = 0.0;
+        let (pixmap, _lbox) = render_window_pixmap_full(
+            &doc,
+            html_id,
+            &styles,
+            800,
+            600,
+            "https://example.com",
+            &mut scroll,
+            &mut total_h,
+            false,
+            "https://example.com",
+            19,
+            &ImageCache::new(),
+            true,
+            0.5,
+            Some("https://example.com/target"),
+            (400.0, 300.0),
+        )
+        .expect("rendered full window pixmap");
+
+        // 1. Loading bar at y = 34, x = 100 is blue
+        assert_eq!(pixmap.get_pixel(100, 34), Some(Color::rgb(0x89, 0xb4, 0xfa)));
+
+        // 2. Link preview pill at y = 585, x = 10 is drawn (not white)
+        assert_ne!(pixmap.get_pixel(10, 585), Some(Color::WHITE));
+    }
+
+    #[test]
+    fn test_shell_state_loading_lifecycle_and_clearing() {
+        let mut state = ShellState::new("about:welcome".to_string());
+        assert!(!state.is_loading);
+
+        // Start loading
+        state.start_loading("https://example.com");
+        assert!(state.is_loading);
+        assert_eq!(state.loading_progress, 0.20);
+        assert_eq!(state.address_input_buffer, "https://example.com");
+
+        // Progress update
+        state.set_loading_progress(0.60);
+        assert_eq!(state.loading_progress, 0.60);
+
+        // Render frame with loading active
+        let frame = state.render_window_frame(800, 600).unwrap();
+        assert_eq!(frame.get_pixel(100, 34), Some(Color::rgb(0x89, 0xb4, 0xfa)));
+
+        // Finish loading
+        state.finish_loading();
+        assert_eq!(state.loading_progress, 1.0);
+        assert!(state.is_loading);
+
+        // First render presents 100% full loading bar and transitions is_loading to false
+        let final_load_frame = state.render_window_frame(800, 600).unwrap();
+        assert_eq!(final_load_frame.get_pixel(750, 34), Some(Color::rgb(0x89, 0xb4, 0xfa)));
+        assert!(!state.is_loading);
+
+        // Subsequent render has no loading bar; separator line at y = 35 is clean
+        state.cached_window = None;
+        let clean_frame = state.render_window_frame(800, 600).unwrap();
+        assert_eq!(clean_frame.get_pixel(100, TOOLBAR_HEIGHT - 1), Some(Color::rgb(0x45, 0x47, 0x5a)));
+    }
+
+    #[test]
+    fn test_shell_state_hover_link_cache_restoration() {
+        let mut state = ShellState::new("about:welcome".to_string());
+
+        // 1. Initial render
+        let initial_frame = state.render_window_frame(800, 600).unwrap();
+        let clean_pixel = initial_frame.get_pixel(15, 585).unwrap();
+
+        // 2. Hover over a link
+        assert!(state.set_hovered_link(Some("https://example.com/docs".to_string())));
+        assert!(!state.set_hovered_link(Some("https://example.com/docs".to_string()))); // No-op if unchanged
+        assert_eq!(state.hovered_link.as_deref(), Some("https://example.com/docs"));
+
+        let hovered_frame = state.render_window_frame(800, 600).unwrap();
+        let hovered_pixel = hovered_frame.get_pixel(15, 585).unwrap();
+        assert_ne!(hovered_pixel, clean_pixel);
+
+        // 3. Unhover link: cache must restore clean webpage pixels
+        assert!(state.set_hovered_link(None));
+        let restored_frame = state.render_window_frame(800, 600).unwrap();
+        let restored_pixel = restored_frame.get_pixel(15, 585).unwrap();
+        assert_eq!(restored_pixel, clean_pixel);
+    }
+
+    #[test]
+    fn test_history_bidirectional_navigation() {
+        let mut state = ShellState::new("file:///step1".to_string());
+        state.navigate("file:///step2", true);
+        state.navigate("file:///step3", true);
+
+        assert_eq!(state.history_index, 2);
+        assert_eq!(state.current_url, "file:///step3");
+        assert!(!state.go_forward()); // At newest page
+
+        // Go back twice
+        assert!(state.go_back());
+        assert_eq!(state.current_url, "file:///step2");
+        assert!(state.go_back());
+        assert_eq!(state.current_url, "file:///step1");
+        assert!(!state.go_back()); // At oldest page
+
+        // Go forward twice
+        assert!(state.go_forward());
+        assert_eq!(state.current_url, "file:///step2");
+        assert!(state.go_forward());
+        assert_eq!(state.current_url, "file:///step3");
+        assert!(!state.go_forward()); // At newest page
+    }
+
+    #[test]
+    fn test_reload_clears_stylesheet_cache_and_reloads() {
+        let mut state = ShellState::new("about:welcome".to_string());
+        state.stylesheet_cache.insert("about:welcome".to_string(), "body {}".to_string());
+        assert!(state.stylesheet_cache.contains_key("about:welcome"));
+
+        state.reload();
+        assert!(!state.stylesheet_cache.contains_key("about:welcome"));
+        assert_eq!(state.current_url, "about:welcome");
     }
 }
