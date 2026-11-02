@@ -8,7 +8,7 @@
 
 [![Rust](https://img.shields.io/badge/rust-2021%20edition-orange?logo=rust)](https://www.rust-lang.org/)
 [![Safety](https://img.shields.io/badge/unsafe-%23!%5Bdeny(unsafe__code)%5D-success?style=flat)](crates/)
-[![Tests](https://img.shields.io/badge/tests-127%20passed-brightgreen?logo=checkmarx)](crates/)
+[![Tests](https://img.shields.io/badge/tests-136%20passed-brightgreen?logo=checkmarx)](crates/)
 [![Platform](https://img.shields.io/badge/platform-linux-lightgrey?logo=linux)](crates/lilies-shell)
 
 </div>
@@ -49,9 +49,12 @@ cargo run -p lilies-shell -- file:///path/to/page.html
 - **🖼️ Image Rendering & Replaced Element Layout (`<img>`)**: Binary asset fetching (`png`, `jpeg`, `webp`, `gif`), thread-safe image caching (`ImageCache`), replaced element layout with intrinsic aspect ratio preservation (`width`, `height`, `max-width`), and Porter-Duff Source-Over alpha blending with viewport clipping.
 - **🖱️ Interactive Browser Shell**:
   - URL address bar with click-to-focus, text cursor, and full typing/backspace editing.
+  - **Modern Page Loading Bar**: Visual progress bar along the toolbar with background track, Catppuccin Blue fill, and glowing leading edge.
+  - **Link Hover URL Preview**: Bottom-left status pill showing the resolved target URL when hovering hyperlinks, with dynamic cursor avoidance (automatically flips to the bottom-right corner when cursor approaches).
   - Built-in demo pages (`about:welcome`, `about:images`, `about:flex`, `about:js`).
   - Hyperlink and interactive element hit-testing with dynamic pointer cursor, click event dispatch, and one-click navigation.
-  - Linear browsing history stack with backward navigation (`Alt + Left` or `Backspace`).
+  - Linear browsing history stack with backward navigation (`Alt + Left` or `Backspace`) and forward navigation (`Alt + Right`).
+  - Live page reload (`F5` or `Ctrl + R` / `Cmd + R`) and address bar editing cancellation (`Escape`).
   - Smooth vertical mouse-wheel scrolling.
 - **🛡️ 100% Safe Rust**: `#![deny(unsafe_code)]` enforced across every single crate.
 
@@ -93,8 +96,13 @@ flowchart LR
 |---|---|
 | **Focus Address Bar** | Click inside the top toolbar address box |
 | **Navigate** | Press `Enter` with address bar focused |
+| **Cancel Address Editing** | `Escape` (unfocuses address bar and restores current URL) |
 | **Click Links** | Left click on any `<a href="...">` text link |
+| **Preview Link Target** | Hover cursor over any link (displays destination in bottom-left status pill) |
+| **Page Loading Indicator** | Visual progress bar along toolbar bottom during page load |
 | **Go Back** | `Alt + Left Arrow` (or `Backspace` when address bar is unfocused) |
+| **Go Forward** | `Alt + Right Arrow` |
+| **Reload Page** | `F5` or `Ctrl + R` / `Cmd + R` |
 | **Scroll Page** | Mouse wheel or trackpad vertical scroll gesture |
 
 ---
