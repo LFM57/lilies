@@ -17,7 +17,7 @@ pub use computed::{
 };
 pub use error::CssError;
 pub use matcher::{matches, matches_document};
-pub use parser::{parse_declarations, parse_stylesheet, CssParser};
+pub use parser::{parse_declarations, parse_selectors, parse_stylesheet, CssParser};
 pub use specificity::Specificity;
 
 #[cfg(test)]

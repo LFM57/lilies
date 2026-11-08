@@ -723,3 +723,17 @@ pub fn parse_declarations(css: &str) -> Result<Vec<Declaration>, CssError> {
     let mut parser = CssParser::new(css);
     parser.parse_declarations()
 }
+
+/// Convenience function to parse a comma-separated CSS selector list into `Selector` objects.
+pub fn parse_selectors(css: &str) -> Result<Vec<Selector>, CssError> {
+    let mut parser = CssParser::new(css);
+    let selectors = parser.parse_selectors()?;
+    parser.skip_whitespace_and_comments();
+    if !parser.is_eof() {
+        return Err(CssError::ParseError(format!(
+            "Trailing characters in selector: '{}'",
+            &css[parser.pos..]
+        )));
+    }
+    Ok(selectors)
+}

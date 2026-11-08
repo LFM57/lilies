@@ -528,3 +528,19 @@ fn test_at_rules_descendant_selectors_important_and_borders() {
     let a_style = styles.get(a).expect("a style");
     assert_eq!(a_style.color, Color::rgb(10, 20, 30));
 }
+
+#[test]
+fn test_parse_selectors_standalone() {
+    let selectors = crate::parse_selectors("div > p.highlight, span#title, a:first-child").unwrap();
+    assert_eq!(selectors.len(), 3);
+
+    assert_eq!(selectors[0].tag_name.as_deref(), Some("p"));
+    assert_eq!(selectors[0].classes, vec!["highlight"]);
+    assert!(selectors[0].parent.is_some());
+
+    assert_eq!(selectors[1].tag_name.as_deref(), Some("span"));
+    assert_eq!(selectors[1].id.as_deref(), Some("title"));
+
+    assert_eq!(selectors[2].tag_name.as_deref(), Some("a"));
+    assert_eq!(selectors[2].pseudo_classes, vec!["first-child"]);
+}
