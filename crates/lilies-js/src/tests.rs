@@ -949,3 +949,114 @@ fn test_window_and_document_event_listeners_and_bubbling() {
     let res5 = runtime.eval("customFired").unwrap();
     assert_eq!(res5.as_boolean(), Some(true));
 }
+
+#[test]
+fn test_timers_and_request_animation_frame() {
+    let doc = parse_html("<html><body></body></html>");
+    let mut runtime = JsRuntime::new(doc);
+
+    runtime
+        .eval(
+            r#"
+        var results = [];
+        var t1 = setTimeout(function() {
+            results.push("timeout_0");
+        }, 0);
+
+        var t2 = setTimeout(function() {
+            results.push("cancelled");
+        }, 0);
+        clearTimeout(t2);
+
+        var count = 0;
+        var intervalId = setInterval(function() {
+            count++;
+            results.push("interval_" + count);
+            if (count >= 2) {
+                clearInterval(intervalId);
+            }
+        }, 10);
+
+        var rafTimestamp = -1;
+        var rafId = requestAnimationFrame(function(ts) {
+            rafTimestamp = ts;
+            results.push("raf");
+        });
+
+        var cancelRafId = requestAnimationFrame(function() {
+            results.push("raf_cancelled");
+        });
+        cancelAnimationFrame(cancelRafId);
+    "#,
+        )
+        .expect("setup failed");
+
+    // Initially nothing has run yet
+    let initial_res = runtime.eval("results.join('|')").unwrap();
+    assert_eq!(
+        initial_res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("".to_string())
+    );
+
+    // Run ready timers (delay = 0)
+    let fired = runtime.run_ready_timers().unwrap();
+    assert!(fired >= 1);
+    let after_timeout = runtime.eval("results.join('|')").unwrap();
+    assert_eq!(
+        after_timeout.as_string().map(|s| s.to_std_string_escaped()),
+        Some("timeout_0".to_string())
+    );
+
+    // Run animation frames
+    let rafs = runtime.run_animation_frames(123.45).unwrap();
+    assert_eq!(rafs, 1); // 2 registered, 1 cancelled, 1 ran
+    let after_raf = runtime.eval("results.join('|')").unwrap();
+    assert_eq!(
+        after_raf.as_string().map(|s| s.to_std_string_escaped()),
+        Some("timeout_0|raf".to_string())
+    );
+    let ts_val = runtime.eval("rafTimestamp").unwrap();
+    assert_eq!(ts_val.as_number(), Some(123.45));
+
+    // Wait 15ms so interval fires first tick
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    runtime.run_ready_timers().unwrap();
+    let after_int1 = runtime.eval("results.join('|')").unwrap();
+    assert_eq!(
+        after_int1.as_string().map(|s| s.to_std_string_escaped()),
+        Some("timeout_0|raf|interval_1".to_string())
+    );
+
+    // Wait 15ms so interval fires second tick and cancels itself
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    runtime.run_ready_timers().unwrap();
+    let after_int2 = runtime.eval("results.join('|')").unwrap();
+    assert_eq!(
+        after_int2.as_string().map(|s| s.to_std_string_escaped()),
+        Some("timeout_0|raf|interval_1|interval_2".to_string())
+    );
+
+    // Wait another 15ms to verify interval is not called a 3rd time
+    std::thread::sleep(std::time::Duration::from_millis(15));
+    runtime.run_ready_timers().unwrap();
+    let after_int3 = runtime.eval("results.join('|')").unwrap();
+    assert_eq!(
+        after_int3.as_string().map(|s| s.to_std_string_escaped()),
+        Some("timeout_0|raf|interval_1|interval_2".to_string())
+    );
+
+    // Test setTimeout with string evaluation
+    runtime
+        .eval(
+            r#"
+        setTimeout("results.push('string_eval')", 0);
+    "#,
+        )
+        .unwrap();
+    runtime.run_ready_timers().unwrap();
+    let after_str = runtime.eval("results.join('|')").unwrap();
+    assert_eq!(
+        after_str.as_string().map(|s| s.to_std_string_escaped()),
+        Some("timeout_0|raf|interval_1|interval_2|string_eval".to_string())
+    );
+}

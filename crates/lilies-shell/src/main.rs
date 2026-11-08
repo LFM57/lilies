@@ -696,6 +696,7 @@ pub fn run_scripts_for_document(runtime: &mut JsRuntime, base_url: &str) {
     }
     let _ = runtime.dispatch_event(None, "DOMContentLoaded");
     let _ = runtime.dispatch_event(None, "load");
+    let _ = runtime.run_ready_timers();
 }
 
 /// Cached rendering of the webpage for fast compositing during address bar interaction.
@@ -891,6 +892,7 @@ impl ShellState {
         if let Err(e) = self.js_runtime.dispatch_click(hit_id) {
             eprintln!("JS error on click: {}", e);
         }
+        let _ = self.js_runtime.run_ready_timers();
         if self.js_runtime.take_dirty() {
             self.doc = self.js_runtime.doc().clone();
             load_images_for_document(&self.doc, &self.current_url, &self.image_cache);
@@ -1229,6 +1231,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Step 4: Run event loop
+    let start_instant = std::time::Instant::now();
     event_loop.run(move |event, elwt| match event {
         Event::WindowEvent { event, window_id } if window_id == window.id() => match event {
             WindowEvent::Resized(physical_size) => {
@@ -1481,6 +1484,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => {}
         },
+        Event::AboutToWait => {
+            let _ = state.js_runtime.run_ready_timers();
+            let _ = state.js_runtime.run_animation_frames(
+                start_instant.elapsed().as_secs_f64() * 1000.0,
+            );
+            if state.js_runtime.take_dirty() {
+                state.doc = state.js_runtime.doc().clone();
+                load_images_for_document(&state.doc, &state.current_url, &state.image_cache);
+                state.styles =
+                    load_styles_with_cache(&state.doc, &state.current_url, &mut state.stylesheet_cache);
+                state.cached_page = None;
+                state.cached_window = None;
+                window.request_redraw();
+            }
+            if let Some(delay) = state.js_runtime.next_timer_delay() {
+                elwt.set_control_flow(winit::event_loop::ControlFlow::wait_duration(delay));
+            } else {
+                elwt.set_control_flow(winit::event_loop::ControlFlow::Wait);
+            }
+        }
         _ => {}
     })?;
 

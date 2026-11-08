@@ -13,8 +13,9 @@ use boa_gc::{Finalize, Trace};
 use lilies_css::{matches as css_matches, parse_selectors};
 use lilies_dom::{Document, IndexMap, NodeId};
 use std::cell::{Ref, RefCell, RefMut};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 /// Converts a camelCase string (e.g. "backgroundColor", "fontSize") to kebab-case ("background-color", "font-size").
 pub fn camel_to_kebab(s: &str) -> String {
@@ -153,6 +154,28 @@ pub fn set_node_text_content(doc: &mut Document, node_id: NodeId, text: &str) {
 #[boa_gc(empty_trace)]
 pub struct ElementNode(pub NodeId);
 
+/// Callback for a scheduled timer (either a JavaScript function or source script).
+#[derive(Clone)]
+pub enum TimerCallback {
+    Function(JsFunction),
+    Script(String),
+}
+
+/// A scheduled timer entry.
+pub struct Timer {
+    pub id: u32,
+    pub callback: TimerCallback,
+    pub target_time: Instant,
+    pub interval: Option<Duration>,
+    pub args: Vec<JsValue>,
+}
+
+/// A queued requestAnimationFrame callback.
+pub struct AnimationFrame {
+    pub id: u32,
+    pub callback: JsFunction,
+}
+
 /// Internal state managed by the JavaScript runtime.
 pub struct RuntimeInner {
     pub doc: Document,
@@ -162,6 +185,13 @@ pub struct RuntimeInner {
     pub document_listeners: HashMap<String, Vec<JsFunction>>,
     pub window_listeners: HashMap<String, Vec<JsFunction>>,
     pub element_listeners: HashMap<(NodeId, String), Vec<JsFunction>>,
+    pub start_time: Instant,
+    pub next_timer_id: u32,
+    pub timers: Vec<Timer>,
+    pub cancelled_timers: HashSet<u32>,
+    pub next_raf_id: u32,
+    pub animation_frames: Vec<AnimationFrame>,
+    pub cancelled_rafs: HashSet<u32>,
 }
 
 thread_local! {
@@ -1021,6 +1051,165 @@ fn window_dispatch_event(
     };
     let allowed = dispatch_event_with_context(None, &event_type, context)?;
     Ok(JsValue::new(allowed))
+}
+
+fn native_set_timeout(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let cb_arg = args.get_or_undefined(0);
+    let callback = if let Some(func_obj) = cb_arg.as_callable() {
+        if let Some(func) = JsFunction::from_object(func_obj.clone()) {
+            TimerCallback::Function(func)
+        } else {
+            return Ok(JsValue::new(0));
+        }
+    } else if let Some(s) = cb_arg.as_string() {
+        TimerCallback::Script(s.to_std_string_escaped())
+    } else {
+        return Ok(JsValue::new(0));
+    };
+
+    let delay_ms = args
+        .get(1)
+        .and_then(|v| v.as_number())
+        .unwrap_or(0.0)
+        .max(0.0);
+    let delay = Duration::from_millis(delay_ms as u64);
+
+    let pass_args = if args.len() > 2 {
+        args[2..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let timer_id = with_current_runtime(|inner| {
+        let id = inner.next_timer_id;
+        inner.next_timer_id = inner.next_timer_id.wrapping_add(1).max(1);
+        let target_time = Instant::now() + delay;
+        inner.timers.push(Timer {
+            id,
+            callback,
+            target_time,
+            interval: None,
+            args: pass_args,
+        });
+        Ok(id)
+    })?;
+
+    Ok(JsValue::new(timer_id as i32))
+}
+
+fn native_clear_timeout(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id_val = args.get_or_undefined(0).to_u32(context).unwrap_or(0);
+    with_current_runtime(|inner| {
+        inner.timers.retain(|t| t.id != id_val);
+        inner.cancelled_timers.insert(id_val);
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
+}
+
+fn native_set_interval(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let cb_arg = args.get_or_undefined(0);
+    let callback = if let Some(func_obj) = cb_arg.as_callable() {
+        if let Some(func) = JsFunction::from_object(func_obj.clone()) {
+            TimerCallback::Function(func)
+        } else {
+            return Ok(JsValue::new(0));
+        }
+    } else if let Some(s) = cb_arg.as_string() {
+        TimerCallback::Script(s.to_std_string_escaped())
+    } else {
+        return Ok(JsValue::new(0));
+    };
+
+    let delay_ms = args
+        .get(1)
+        .and_then(|v| v.as_number())
+        .unwrap_or(0.0)
+        .max(1.0);
+    let interval = Duration::from_millis(delay_ms as u64);
+
+    let pass_args = if args.len() > 2 {
+        args[2..].to_vec()
+    } else {
+        Vec::new()
+    };
+
+    let timer_id = with_current_runtime(|inner| {
+        let id = inner.next_timer_id;
+        inner.next_timer_id = inner.next_timer_id.wrapping_add(1).max(1);
+        let target_time = Instant::now() + interval;
+        inner.timers.push(Timer {
+            id,
+            callback,
+            target_time,
+            interval: Some(interval),
+            args: pass_args,
+        });
+        Ok(id)
+    })?;
+
+    Ok(JsValue::new(timer_id as i32))
+}
+
+fn native_clear_interval(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    native_clear_timeout(this, args, context)
+}
+
+fn native_request_animation_frame(
+    _this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let cb_arg = args.get_or_undefined(0);
+    let func = cb_arg
+        .as_object()
+        .and_then(|obj| JsFunction::from_object(obj.clone()))
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("requestAnimationFrame argument must be a function")
+        })?;
+
+    let raf_id = with_current_runtime(|inner| {
+        let id = inner.next_raf_id;
+        inner.next_raf_id = inner.next_raf_id.wrapping_add(1).max(1);
+        inner.animation_frames.push(AnimationFrame {
+            id,
+            callback: func,
+        });
+        Ok(id)
+    })?;
+
+    Ok(JsValue::new(raf_id as i32))
+}
+
+fn native_cancel_animation_frame(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let id_val = args.get_or_undefined(0).to_u32(context).unwrap_or(0);
+    with_current_runtime(|inner| {
+        inner.animation_frames.retain(|r| r.id != id_val);
+        inner.cancelled_rafs.insert(id_val);
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
 }
 
 fn element_append_child(
@@ -2650,6 +2839,13 @@ impl JsRuntime {
             document_listeners: HashMap::new(),
             window_listeners: HashMap::new(),
             element_listeners: HashMap::new(),
+            start_time: Instant::now(),
+            next_timer_id: 1,
+            timers: Vec::new(),
+            cancelled_timers: HashSet::new(),
+            next_raf_id: 1,
+            animation_frames: Vec::new(),
+            cancelled_rafs: HashSet::new(),
         }));
 
         let _guard = ActiveRuntimeGuard::new(&inner);
@@ -2754,6 +2950,36 @@ impl JsRuntime {
             js_string!("__window_remove_event_listener"),
             2,
             NativeFunction::from_fn_ptr(window_remove_event_listener),
+        );
+        let _ = context.register_global_callable(
+            js_string!("setTimeout"),
+            2,
+            NativeFunction::from_fn_ptr(native_set_timeout),
+        );
+        let _ = context.register_global_callable(
+            js_string!("clearTimeout"),
+            1,
+            NativeFunction::from_fn_ptr(native_clear_timeout),
+        );
+        let _ = context.register_global_callable(
+            js_string!("setInterval"),
+            2,
+            NativeFunction::from_fn_ptr(native_set_interval),
+        );
+        let _ = context.register_global_callable(
+            js_string!("clearInterval"),
+            1,
+            NativeFunction::from_fn_ptr(native_clear_interval),
+        );
+        let _ = context.register_global_callable(
+            js_string!("requestAnimationFrame"),
+            1,
+            NativeFunction::from_fn_ptr(native_request_animation_frame),
+        );
+        let _ = context.register_global_callable(
+            js_string!("cancelAnimationFrame"),
+            1,
+            NativeFunction::from_fn_ptr(native_cancel_animation_frame),
         );
         let _ = context.register_global_callable(
             js_string!("__set_style_internal"),
@@ -3066,12 +3292,6 @@ impl JsRuntime {
                 pixelDepth: 24
             };
 
-            window.setTimeout = function(fn, delay) { return 1; };
-            window.clearTimeout = function(id) {};
-            window.setInterval = function(fn, delay) { return 1; };
-            window.clearInterval = function(id) {};
-            window.requestAnimationFrame = function(cb) { return 1; };
-            window.cancelAnimationFrame = function(id) {};
             window.addEventListener = function(evt, handler) {
                 __window_add_event_listener(evt, handler);
             };
@@ -3251,5 +3471,129 @@ impl JsRuntime {
     /// Returns a mutable reference to the Boa `Context`.
     pub fn context(&mut self) -> &mut Context {
         &mut self.context
+    }
+
+    /// Runs all timers that have reached or passed their scheduled deadline.
+    /// Reschedules repeating interval timers.
+    /// Returns the number of callbacks executed.
+    pub fn run_ready_timers(&mut self) -> Result<usize, JsError> {
+        let _guard = ActiveRuntimeGuard::new(&self.inner);
+        let now = Instant::now();
+        let ready_timers: Vec<Timer> = {
+            let mut inner = self.inner.borrow_mut();
+            let mut ready = Vec::new();
+            let mut remaining = Vec::new();
+            for timer in inner.timers.drain(..) {
+                if timer.target_time <= now {
+                    ready.push(timer);
+                } else {
+                    remaining.push(timer);
+                }
+            }
+            inner.timers = remaining;
+            ready
+        };
+
+        let mut count = 0;
+        let mut reschedule = Vec::new();
+        for timer in ready_timers {
+            count += 1;
+            match &timer.callback {
+                TimerCallback::Function(f) => {
+                    let global = self.context.global_object();
+                    let this_val = JsValue::new(global);
+                    if let Err(e) = f.call(&this_val, &timer.args, &mut self.context) {
+                        eprintln!("Timer callback error: {e}");
+                    }
+                }
+                TimerCallback::Script(script) => {
+                    if let Err(e) = self.eval(script) {
+                        eprintln!("Timer script evaluation error: {e}");
+                    }
+                }
+            }
+
+            if let Some(interval) = timer.interval {
+                let cancelled = self.inner.borrow().cancelled_timers.contains(&timer.id);
+                if !cancelled {
+                    reschedule.push(Timer {
+                        id: timer.id,
+                        callback: timer.callback,
+                        target_time: Instant::now() + interval,
+                        interval: Some(interval),
+                        args: timer.args,
+                    });
+                }
+            }
+        }
+
+        if !reschedule.is_empty() {
+            let mut inner = self.inner.borrow_mut();
+            inner.timers.extend(reschedule);
+        }
+        self.inner.borrow_mut().cancelled_timers.clear();
+
+        Ok(count)
+    }
+
+    /// Runs all queued animation frame callbacks, passing the timestamp in milliseconds.
+    /// Returns the number of callbacks executed.
+    pub fn run_animation_frames(&mut self, timestamp_ms: f64) -> Result<usize, JsError> {
+        let _guard = ActiveRuntimeGuard::new(&self.inner);
+        let frames: Vec<AnimationFrame> = {
+            let mut inner = self.inner.borrow_mut();
+            inner.animation_frames.drain(..).collect()
+        };
+
+        let mut count = 0;
+        let global = self.context.global_object();
+        let this_val = JsValue::new(global);
+        let ts_val = JsValue::new(timestamp_ms);
+
+        for frame in frames {
+            let cancelled = self.inner.borrow().cancelled_rafs.contains(&frame.id);
+            if !cancelled {
+                count += 1;
+                if let Err(e) = frame.callback.call(&this_val, &[ts_val.clone()], &mut self.context) {
+                    eprintln!("requestAnimationFrame callback error: {e}");
+                }
+            }
+        }
+
+        self.inner.borrow_mut().cancelled_rafs.clear();
+        Ok(count)
+    }
+
+    /// Returns the time duration until the next timer is scheduled to fire,
+    /// or None if there are no pending timers.
+    pub fn next_timer_delay(&self) -> Option<Duration> {
+        let inner = self.inner.borrow();
+        let now = Instant::now();
+        let mut min_delay: Option<Duration> = None;
+        for t in &inner.timers {
+            let delay = if t.target_time <= now {
+                Duration::from_millis(0)
+            } else {
+                t.target_time.duration_since(now)
+            };
+            min_delay = match min_delay {
+                Some(current) => Some(current.min(delay)),
+                None => Some(delay),
+            };
+        }
+        if !inner.animation_frames.is_empty() {
+            min_delay = Some(Duration::from_millis(0));
+        }
+        min_delay
+    }
+
+    /// Returns the number of pending timers.
+    pub fn pending_timers_count(&self) -> usize {
+        self.inner.borrow().timers.len()
+    }
+
+    /// Returns the number of pending animation frames.
+    pub fn pending_animation_frames_count(&self) -> usize {
+        self.inner.borrow().animation_frames.len()
     }
 }
