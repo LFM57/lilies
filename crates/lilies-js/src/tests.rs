@@ -820,3 +820,132 @@ fn test_window_image_dom_element() {
         Some("IMG|https://example.com/test.png|Test Image|true|true|true".to_string())
     );
 }
+
+#[test]
+fn test_window_and_document_event_listeners_and_bubbling() {
+    let doc = parse_html(r#"<html><body><div id="wrapper"><button id="btn">Click me</button></div></body></html>"#);
+    let mut runtime = JsRuntime::new(doc);
+
+    runtime
+        .eval(
+            r#"
+        var log = [];
+        window.addEventListener("DOMContentLoaded", function(e) {
+            log.push("window:domcontentloaded");
+        });
+        document.addEventListener("DOMContentLoaded", function(e) {
+            log.push("doc:domcontentloaded");
+        });
+        window.addEventListener("load", function(e) {
+            log.push("window:load");
+        });
+
+        var wrapper = document.getElementById("wrapper");
+        var btn = document.getElementById("btn");
+
+        wrapper.addEventListener("click", function(e) {
+            log.push("wrapper:click");
+        });
+        document.addEventListener("click", function(e) {
+            log.push("doc:click");
+        });
+        window.addEventListener("click", function(e) {
+            log.push("window:click");
+        });
+        btn.addEventListener("click", function(e) {
+            log.push("btn:click");
+        });
+    "#,
+        )
+        .expect("eval setup failed");
+
+    // Test DOMContentLoaded dispatch
+    runtime.dispatch_event(None, "DOMContentLoaded").unwrap();
+    // Test load dispatch
+    runtime.dispatch_event(None, "load").unwrap();
+
+    let res = runtime.eval("log.join('|')").unwrap();
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("doc:domcontentloaded|window:domcontentloaded|window:load".to_string())
+    );
+
+    // Test click bubbling: btn -> wrapper -> document -> window
+    let btn_id = runtime.find_element_by_id("btn").unwrap();
+    runtime.eval("log = [];").unwrap();
+    let default_allowed = runtime.dispatch_click(btn_id).unwrap();
+    assert!(default_allowed);
+
+    let res2 = runtime.eval("log.join('|')").unwrap();
+    assert_eq!(
+        res2.as_string().map(|s| s.to_std_string_escaped()),
+        Some("btn:click|wrapper:click|doc:click|window:click".to_string())
+    );
+
+    // Test removeEventListener on document and window
+    runtime
+        .eval(
+            r#"
+        log = [];
+        var removeHandler = function() { log.push("never"); };
+        document.addEventListener("click", removeHandler);
+        document.removeEventListener("click", removeHandler);
+        window.addEventListener("click", removeHandler);
+        window.removeEventListener("click", removeHandler);
+    "#,
+        )
+        .unwrap();
+    runtime.dispatch_click(btn_id).unwrap();
+    let res3 = runtime.eval("log.join('|')").unwrap();
+    assert_eq!(
+        res3.as_string().map(|s| s.to_std_string_escaped()),
+        Some("btn:click|wrapper:click|doc:click|window:click".to_string())
+    );
+
+    // Test stopPropagation()
+    runtime
+        .eval(
+            r#"
+        log = [];
+        btn.addEventListener("click", function(e) {
+            e.stopPropagation();
+            log.push("btn:stopped");
+        });
+    "#,
+        )
+        .unwrap();
+    runtime.dispatch_click(btn_id).unwrap();
+    let res4 = runtime.eval("log.join('|')").unwrap();
+    assert_eq!(
+        res4.as_string().map(|s| s.to_std_string_escaped()),
+        Some("btn:click|btn:stopped".to_string())
+    );
+
+    // Test preventDefault()
+    runtime
+        .eval(
+            r#"
+        btn.addEventListener("click", function(e) {
+            e.preventDefault();
+        });
+    "#,
+        )
+        .unwrap();
+    let not_prevented = runtime.dispatch_click(btn_id).unwrap();
+    assert!(!not_prevented);
+
+    // Test dispatchEvent on element and document
+    runtime
+        .eval(
+            r#"
+        var customFired = false;
+        btn.addEventListener("custom", function(e) {
+            customFired = (e.type === "custom");
+        });
+        btn.dispatchEvent({ type: "custom" });
+    "#,
+        )
+        .unwrap();
+    let res5 = runtime.eval("customFired").unwrap();
+    assert_eq!(res5.as_boolean(), Some(true));
+}

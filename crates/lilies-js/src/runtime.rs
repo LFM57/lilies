@@ -159,6 +159,9 @@ pub struct RuntimeInner {
     pub dirty: bool,
     pub click_listeners: HashMap<NodeId, Vec<JsFunction>>,
     pub node_cache: HashMap<NodeId, boa_engine::object::JsObject>,
+    pub document_listeners: HashMap<String, Vec<JsFunction>>,
+    pub window_listeners: HashMap<String, Vec<JsFunction>>,
+    pub element_listeners: HashMap<(NodeId, String), Vec<JsFunction>>,
 }
 
 thread_local! {
@@ -817,12 +820,14 @@ fn element_add_event_listener(
             JsNativeError::typ().with_message("addEventListener second argument must be a function")
         })?;
 
-    if event_type.eq_ignore_ascii_case("click") {
-        with_current_runtime(|inner| {
-            inner.click_listeners.entry(node_id).or_default().push(callback);
-            Ok(())
-        })?;
-    }
+    let lower_type = event_type.to_ascii_lowercase();
+    with_current_runtime(|inner| {
+        if lower_type == "click" {
+            inner.click_listeners.entry(node_id).or_default().push(callback.clone());
+        }
+        inner.element_listeners.entry((node_id, lower_type)).or_default().push(callback);
+        Ok(())
+    })?;
 
     Ok(JsValue::undefined())
 }
@@ -836,17 +841,186 @@ fn element_remove_event_listener(
     let event_type = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
     let callback_val = args.get_or_undefined(1);
 
-    if event_type.eq_ignore_ascii_case("click") {
-        if let Some(target_obj) = callback_val.as_object() {
-            with_current_runtime(|inner| {
+    let lower_type = event_type.to_ascii_lowercase();
+    if let Some(target_obj) = callback_val.as_object() {
+        with_current_runtime(|inner| {
+            if lower_type == "click" {
                 if let Some(list) = inner.click_listeners.get_mut(&node_id) {
                     list.retain(|f| !boa_engine::object::JsObject::equals(f, target_obj));
                 }
-                Ok(())
-            })?;
-        }
+            }
+            if let Some(list) = inner.element_listeners.get_mut(&(node_id, lower_type)) {
+                list.retain(|f| !boa_engine::object::JsObject::equals(f, target_obj));
+            }
+            Ok(())
+        })?;
     }
     Ok(JsValue::undefined())
+}
+
+fn element_dispatch_event(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let event_obj = args.get_or_undefined(0);
+    let event_type = if let Some(obj) = event_obj.as_object() {
+        obj.get(js_string!("type"), context)?
+            .to_string(context)?
+            .to_std_string_escaped()
+    } else {
+        args.get_or_undefined(0)
+            .to_string(context)
+            .map(|s| s.to_std_string_escaped())
+            .unwrap_or_else(|_| "custom".to_string())
+    };
+    let allowed = dispatch_event_with_context(Some(node_id), &event_type, context)?;
+    Ok(JsValue::new(allowed))
+}
+
+fn document_add_event_listener(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let event_type = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped()
+        .to_ascii_lowercase();
+    let callback_val = args.get_or_undefined(1);
+    let callback = callback_val
+        .as_object()
+        .and_then(|obj| JsFunction::from_object(obj.clone()))
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("addEventListener second argument must be a function")
+        })?;
+
+    with_current_runtime(|inner| {
+        inner
+            .document_listeners
+            .entry(event_type)
+            .or_default()
+            .push(callback);
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
+}
+
+fn document_remove_event_listener(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let event_type = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped()
+        .to_ascii_lowercase();
+    let callback_val = args.get_or_undefined(1);
+    if let Some(target_obj) = callback_val.as_object() {
+        with_current_runtime(|inner| {
+            if let Some(list) = inner.document_listeners.get_mut(&event_type) {
+                list.retain(|f| !boa_engine::object::JsObject::equals(f, target_obj));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn document_dispatch_event(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let event_obj = args.get_or_undefined(0);
+    let event_type = if let Some(obj) = event_obj.as_object() {
+        obj.get(js_string!("type"), context)?
+            .to_string(context)?
+            .to_std_string_escaped()
+    } else {
+        args.get_or_undefined(0)
+            .to_string(context)
+            .map(|s| s.to_std_string_escaped())
+            .unwrap_or_else(|_| "custom".to_string())
+    };
+    let allowed = dispatch_event_with_context(None, &event_type, context)?;
+    Ok(JsValue::new(allowed))
+}
+
+fn window_add_event_listener(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let event_type = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped()
+        .to_ascii_lowercase();
+    let callback_val = args.get_or_undefined(1);
+    let callback = callback_val
+        .as_object()
+        .and_then(|obj| JsFunction::from_object(obj.clone()))
+        .ok_or_else(|| {
+            JsNativeError::typ()
+                .with_message("addEventListener second argument must be a function")
+        })?;
+
+    with_current_runtime(|inner| {
+        inner
+            .window_listeners
+            .entry(event_type)
+            .or_default()
+            .push(callback);
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
+}
+
+fn window_remove_event_listener(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let event_type = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped()
+        .to_ascii_lowercase();
+    let callback_val = args.get_or_undefined(1);
+    if let Some(target_obj) = callback_val.as_object() {
+        with_current_runtime(|inner| {
+            if let Some(list) = inner.window_listeners.get_mut(&event_type) {
+                list.retain(|f| !boa_engine::object::JsObject::equals(f, target_obj));
+            }
+            Ok(())
+        })?;
+    }
+    Ok(JsValue::undefined())
+}
+
+fn window_dispatch_event(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let event_obj = args.get_or_undefined(0);
+    let event_type = if let Some(obj) = event_obj.as_object() {
+        obj.get(js_string!("type"), context)?
+            .to_string(context)?
+            .to_std_string_escaped()
+    } else {
+        args.get_or_undefined(0)
+            .to_string(context)
+            .map(|s| s.to_std_string_escaped())
+            .unwrap_or_else(|_| "custom".to_string())
+    };
+    let allowed = dispatch_event_with_context(None, &event_type, context)?;
+    Ok(JsValue::new(allowed))
 }
 
 fn element_append_child(
@@ -1607,7 +1781,7 @@ fn element_click(this: &JsValue, _args: &[JsValue], context: &mut Context) -> Js
     Ok(JsValue::undefined())
 }
 
-fn dispatch_click_with_context(node_id: NodeId, context: &mut Context) -> JsResult<()> {
+fn dispatch_click_with_context(node_id: NodeId, context: &mut Context) -> JsResult<bool> {
     let target_id = with_current_runtime(|inner| {
         let mut curr = Some(node_id);
         let mut found = node_id;
@@ -1620,6 +1794,24 @@ fn dispatch_click_with_context(node_id: NodeId, context: &mut Context) -> JsResu
         }
         Ok(found)
     })?;
+
+    let target_obj = get_or_create_element_object(target_id, context)?;
+    let create_event_fn = context
+        .global_object()
+        .get(js_string!("__createClickEvent"), context)?;
+
+    let event_val = if let Some(create_fn) = create_event_fn.as_callable() {
+        create_fn.call(
+            &JsValue::undefined(),
+            &[
+                JsValue::new(target_obj.clone()),
+                JsValue::new(target_obj.clone()),
+            ],
+            context,
+        )?
+    } else {
+        JsValue::undefined()
+    };
 
     let mut ancestor_chain = Vec::new();
     let mut current = Some(node_id);
@@ -1651,33 +1843,19 @@ fn dispatch_click_with_context(node_id: NodeId, context: &mut Context) -> JsResu
         current = parent_id;
     }
 
-    if ancestor_chain.is_empty() {
-        return Ok(());
-    }
-
-    let target_obj = get_or_create_element_object(target_id, context)?;
-    let create_event_fn = context
-        .global_object()
-        .get(js_string!("__createClickEvent"), context)?;
-
+    let mut stopped = false;
     for (curr_id, cbs) in ancestor_chain {
         let current_target_obj = get_or_create_element_object(curr_id, context)?;
-        let this_val = JsValue::new(current_target_obj.clone());
-
-        let event_val = if let Some(create_fn) = create_event_fn.as_callable() {
-            create_fn.call(
-                &JsValue::undefined(),
-                &[
-                    JsValue::new(target_obj.clone()),
-                    JsValue::new(current_target_obj),
-                ],
+        if let Some(ev_obj) = event_val.as_object() {
+            let _ = ev_obj.set(
+                js_string!("currentTarget"),
+                current_target_obj.clone(),
+                false,
                 context,
-            )?
-        } else {
-            JsValue::undefined()
-        };
+            );
+        }
+        let this_val = JsValue::new(current_target_obj);
 
-        let mut stopped = false;
         for cb in cbs {
             cb.call(&this_val, std::slice::from_ref(&event_val), context)?;
             if let Some(ev_obj) = event_val.as_object() {
@@ -1691,11 +1869,332 @@ fn dispatch_click_with_context(node_id: NodeId, context: &mut Context) -> JsResu
             }
         }
         if stopped {
-            break;
+            let default_prevented = if let Some(ev_obj) = event_val.as_object() {
+                ev_obj
+                    .get(js_string!("defaultPrevented"), context)
+                    .map(|v| v.to_boolean())
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            return Ok(!default_prevented);
         }
     }
 
-    Ok(())
+    // Bubble to document
+    let doc_cbs = with_current_runtime(|inner| {
+        Ok(inner
+            .document_listeners
+            .get("click")
+            .cloned()
+            .unwrap_or_default())
+    })?;
+    let doc_obj = context
+        .global_object()
+        .get(js_string!("document"), context)?;
+    if let Some(ev_obj) = event_val.as_object() {
+        let _ = ev_obj.set(
+            js_string!("currentTarget"),
+            doc_obj.clone(),
+            false,
+            context,
+        );
+    }
+    for cb in doc_cbs {
+        cb.call(&doc_obj, std::slice::from_ref(&event_val), context)?;
+        if let Some(ev_obj) = event_val.as_object() {
+            if ev_obj
+                .get(js_string!("_stopped"), context)
+                .map(|v| v.to_boolean())
+                .unwrap_or(false)
+            {
+                stopped = true;
+            }
+        }
+    }
+    if let Some(doc_o) = doc_obj.as_object() {
+        if let Ok(onclick_val) = doc_o.get(js_string!("onclick"), context) {
+            if let Some(cb_obj) = onclick_val.as_callable() {
+                if let Some(cb) = JsFunction::from_object(cb_obj.clone()) {
+                    let _ = cb.call(&doc_obj, std::slice::from_ref(&event_val), context);
+                }
+            }
+        }
+    }
+    if stopped {
+        let default_prevented = if let Some(ev_obj) = event_val.as_object() {
+            ev_obj
+                .get(js_string!("defaultPrevented"), context)
+                .map(|v| v.to_boolean())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        return Ok(!default_prevented);
+    }
+
+    // Bubble to window
+    let win_cbs = with_current_runtime(|inner| {
+        Ok(inner
+            .window_listeners
+            .get("click")
+            .cloned()
+            .unwrap_or_default())
+    })?;
+    let win_obj = context.global_object();
+    if let Some(ev_obj) = event_val.as_object() {
+        let _ = ev_obj.set(
+            js_string!("currentTarget"),
+            win_obj.clone(),
+            false,
+            context,
+        );
+    }
+    let win_val = JsValue::new(win_obj.clone());
+    for cb in win_cbs {
+        cb.call(&win_val, std::slice::from_ref(&event_val), context)?;
+    }
+    if let Ok(onclick_val) = win_obj.get(js_string!("onclick"), context) {
+        if let Some(cb_obj) = onclick_val.as_callable() {
+            if let Some(cb) = JsFunction::from_object(cb_obj.clone()) {
+                let _ = cb.call(&win_val, std::slice::from_ref(&event_val), context);
+            }
+        }
+    }
+
+    let default_prevented = if let Some(ev_obj) = event_val.as_object() {
+        ev_obj
+            .get(js_string!("defaultPrevented"), context)
+            .map(|v| v.to_boolean())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    Ok(!default_prevented)
+}
+
+fn dispatch_event_with_context(
+    target: Option<NodeId>,
+    event_type: &str,
+    context: &mut Context,
+) -> JsResult<bool> {
+    let lower_type = event_type.to_ascii_lowercase();
+    if target.is_some() && lower_type == "click" {
+        return dispatch_click_with_context(target.unwrap(), context);
+    }
+
+    let doc_obj = context
+        .global_object()
+        .get(js_string!("document"), context)?;
+    let win_obj = context.global_object();
+
+    let target_val = match target {
+        Some(node_id) => {
+            let target_id = with_current_runtime(|inner| {
+                let mut curr = Some(node_id);
+                let mut found = node_id;
+                while let Some(cid) = curr {
+                    if inner.doc.node(cid).is_some_and(|n| n.is_element()) {
+                        found = cid;
+                        break;
+                    }
+                    curr = inner.doc.parent(cid);
+                }
+                Ok(found)
+            })?;
+            JsValue::new(get_or_create_element_object(target_id, context)?)
+        }
+        None => {
+            if lower_type == "load" {
+                JsValue::new(win_obj.clone())
+            } else {
+                doc_obj.clone()
+            }
+        }
+    };
+
+    let create_event_fn = context
+        .global_object()
+        .get(js_string!("__createCustomEvent"), context)?;
+
+    let event_val = if let Some(create_fn) = create_event_fn.as_callable() {
+        create_fn.call(
+            &JsValue::undefined(),
+            &[
+                JsValue::new(js_string!(event_type)),
+                target_val.clone(),
+                target_val.clone(),
+            ],
+            context,
+        )?
+    } else {
+        JsValue::undefined()
+    };
+
+    let mut stopped = false;
+
+    if let Some(node_id) = target {
+        let mut ancestor_chain = Vec::new();
+        let mut current = Some(node_id);
+        while let Some(curr_id) = current {
+            let (listeners, cached_obj, parent_id) = with_current_runtime(|inner| {
+                let list = inner
+                    .element_listeners
+                    .get(&(curr_id, lower_type.clone()))
+                    .cloned()
+                    .unwrap_or_default();
+                let cached = inner.node_cache.get(&curr_id).cloned();
+                let parent = inner.doc.parent(curr_id);
+                Ok((list, cached, parent))
+            })?;
+
+            let mut cbs = listeners;
+            if let Some(cached_obj) = cached_obj {
+                let on_prop_name = format!("on{}", lower_type);
+                if let Ok(on_val) = cached_obj.get(js_string!(on_prop_name), context) {
+                    if let Some(cb_obj) = on_val.as_callable() {
+                        if let Some(cb) = JsFunction::from_object(cb_obj.clone()) {
+                            cbs.push(cb);
+                        }
+                    }
+                }
+            }
+            if !cbs.is_empty() {
+                ancestor_chain.push((curr_id, cbs));
+            }
+            current = parent_id;
+        }
+
+        for (curr_id, cbs) in ancestor_chain {
+            let current_target_obj = get_or_create_element_object(curr_id, context)?;
+            if let Some(ev_obj) = event_val.as_object() {
+                let _ = ev_obj.set(
+                    js_string!("currentTarget"),
+                    current_target_obj.clone(),
+                    false,
+                    context,
+                );
+            }
+            let this_val = JsValue::new(current_target_obj);
+
+            for cb in cbs {
+                cb.call(&this_val, std::slice::from_ref(&event_val), context)?;
+                if let Some(ev_obj) = event_val.as_object() {
+                    if ev_obj
+                        .get(js_string!("_stopped"), context)
+                        .map(|v| v.to_boolean())
+                        .unwrap_or(false)
+                    {
+                        stopped = true;
+                    }
+                }
+            }
+            if stopped {
+                let default_prevented = if let Some(ev_obj) = event_val.as_object() {
+                    ev_obj
+                        .get(js_string!("defaultPrevented"), context)
+                        .map(|v| v.to_boolean())
+                        .unwrap_or(false)
+                } else {
+                    false
+                };
+                return Ok(!default_prevented);
+            }
+        }
+    }
+
+    // Document listeners
+    let doc_cbs = with_current_runtime(|inner| {
+        Ok(inner
+            .document_listeners
+            .get(&lower_type)
+            .cloned()
+            .unwrap_or_default())
+    })?;
+    if !doc_cbs.is_empty() || doc_obj.as_object().is_some() {
+        if let Some(ev_obj) = event_val.as_object() {
+            let _ = ev_obj.set(
+                js_string!("currentTarget"),
+                doc_obj.clone(),
+                false,
+                context,
+            );
+        }
+        for cb in doc_cbs {
+            cb.call(&doc_obj, std::slice::from_ref(&event_val), context)?;
+            if let Some(ev_obj) = event_val.as_object() {
+                if ev_obj
+                    .get(js_string!("_stopped"), context)
+                    .map(|v| v.to_boolean())
+                    .unwrap_or(false)
+                {
+                    stopped = true;
+                }
+            }
+        }
+        if let Some(doc_o) = doc_obj.as_object() {
+            let on_prop = format!("on{}", lower_type);
+            if let Ok(on_val) = doc_o.get(js_string!(on_prop), context) {
+                if let Some(cb_obj) = on_val.as_callable() {
+                    if let Some(cb) = JsFunction::from_object(cb_obj.clone()) {
+                        let _ = cb.call(&doc_obj, std::slice::from_ref(&event_val), context);
+                    }
+                }
+            }
+        }
+        if stopped {
+            let default_prevented = if let Some(ev_obj) = event_val.as_object() {
+                ev_obj
+                    .get(js_string!("defaultPrevented"), context)
+                    .map(|v| v.to_boolean())
+                    .unwrap_or(false)
+            } else {
+                false
+            };
+            return Ok(!default_prevented);
+        }
+    }
+
+    // Window listeners
+    let win_cbs = with_current_runtime(|inner| {
+        Ok(inner
+            .window_listeners
+            .get(&lower_type)
+            .cloned()
+            .unwrap_or_default())
+    })?;
+    let win_val = JsValue::new(win_obj.clone());
+    if let Some(ev_obj) = event_val.as_object() {
+        let _ = ev_obj.set(
+            js_string!("currentTarget"),
+            win_obj.clone(),
+            false,
+            context,
+        );
+    }
+    for cb in win_cbs {
+        cb.call(&win_val, std::slice::from_ref(&event_val), context)?;
+    }
+    let on_prop = format!("on{}", lower_type);
+    if let Ok(on_val) = win_obj.get(js_string!(on_prop), context) {
+        if let Some(cb_obj) = on_val.as_callable() {
+            if let Some(cb) = JsFunction::from_object(cb_obj.clone()) {
+                let _ = cb.call(&win_val, std::slice::from_ref(&event_val), context);
+            }
+        }
+    }
+
+    let default_prevented = if let Some(ev_obj) = event_val.as_object() {
+        ev_obj
+            .get(js_string!("defaultPrevented"), context)
+            .map(|v| v.to_boolean())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    Ok(!default_prevented)
 }
 
 fn element_get_bounding_client_rect(
@@ -1985,6 +2484,7 @@ pub fn create_element_object(
         .function(NativeFunction::from_fn_ptr(element_has_attribute), js_string!("hasAttribute"), 1)
         .function(NativeFunction::from_fn_ptr(element_add_event_listener), js_string!("addEventListener"), 2)
         .function(NativeFunction::from_fn_ptr(element_remove_event_listener), js_string!("removeEventListener"), 2)
+        .function(NativeFunction::from_fn_ptr(element_dispatch_event), js_string!("dispatchEvent"), 1)
         .function(NativeFunction::from_fn_ptr(element_append_child), js_string!("appendChild"), 1)
         .function(NativeFunction::from_fn_ptr(element_remove_child), js_string!("removeChild"), 1)
         .function(NativeFunction::from_fn_ptr(element_insert_before), js_string!("insertBefore"), 2)
@@ -2147,6 +2647,9 @@ impl JsRuntime {
             dirty: false,
             click_listeners: HashMap::new(),
             node_cache: HashMap::new(),
+            document_listeners: HashMap::new(),
+            window_listeners: HashMap::new(),
+            element_listeners: HashMap::new(),
         }));
 
         let _guard = ActiveRuntimeGuard::new(&inner);
@@ -2204,6 +2707,21 @@ impl JsRuntime {
                 js_string!("getElementsByTagName"),
                 1,
             )
+            .function(
+                NativeFunction::from_fn_ptr(document_add_event_listener),
+                js_string!("addEventListener"),
+                2,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(document_remove_event_listener),
+                js_string!("removeEventListener"),
+                2,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(document_dispatch_event),
+                js_string!("dispatchEvent"),
+                1,
+            )
             .build();
         let _ = context.register_global_property(
             js_string!("document"),
@@ -2211,7 +2729,32 @@ impl JsRuntime {
             Attribute::all(),
         );
 
-        // 3. Register internal DOM helpers
+        // 3. Register internal DOM helpers and global event listeners
+        let _ = context.register_global_callable(
+            js_string!("addEventListener"),
+            2,
+            NativeFunction::from_fn_ptr(window_add_event_listener),
+        );
+        let _ = context.register_global_callable(
+            js_string!("removeEventListener"),
+            2,
+            NativeFunction::from_fn_ptr(window_remove_event_listener),
+        );
+        let _ = context.register_global_callable(
+            js_string!("dispatchEvent"),
+            1,
+            NativeFunction::from_fn_ptr(window_dispatch_event),
+        );
+        let _ = context.register_global_callable(
+            js_string!("__window_add_event_listener"),
+            2,
+            NativeFunction::from_fn_ptr(window_add_event_listener),
+        );
+        let _ = context.register_global_callable(
+            js_string!("__window_remove_event_listener"),
+            2,
+            NativeFunction::from_fn_ptr(window_remove_event_listener),
+        );
         let _ = context.register_global_callable(
             js_string!("__set_style_internal"),
             3,
@@ -2529,8 +3072,12 @@ impl JsRuntime {
             window.clearInterval = function(id) {};
             window.requestAnimationFrame = function(cb) { return 1; };
             window.cancelAnimationFrame = function(id) {};
-            window.addEventListener = function(evt, handler) {};
-            window.removeEventListener = function(evt, handler) {};
+            window.addEventListener = function(evt, handler) {
+                __window_add_event_listener(evt, handler);
+            };
+            window.removeEventListener = function(evt, handler) {
+                __window_remove_event_listener(evt, handler);
+            };
 
             window.Image = function(width, height) {
                 var img = __create_element("img");
@@ -2550,8 +3097,6 @@ impl JsRuntime {
             document.readyState = "complete";
             document.cookie = "";
             document.title = "";
-            document.addEventListener = function(evt, handler) {};
-            document.removeEventListener = function(evt, handler) {};
 
             Object.defineProperty(document, 'documentElement', {
                 get: function() { return __get_document_element(); },
@@ -2605,6 +3150,20 @@ impl JsRuntime {
                     stopPropagation: function() { this._stopped = true; this.cancelBubble = true; }
                 };
             };
+
+            globalThis.__createCustomEvent = function(type, target, currentTarget) {
+                return {
+                    type: type || "",
+                    target: target,
+                    currentTarget: currentTarget,
+                    srcElement: target,
+                    defaultPrevented: false,
+                    cancelBubble: false,
+                    _stopped: false,
+                    preventDefault: function() { this.defaultPrevented = true; },
+                    stopPropagation: function() { this._stopped = true; this.cancelBubble = true; }
+                };
+            };
         "#;
         let _ = context.eval(Source::from_bytes(browser_preamble.as_bytes()));
 
@@ -2618,9 +3177,23 @@ impl JsRuntime {
     }
 
     /// Dispatches a click event to `node_id`, bubbling up ancestors if necessary.
-    pub fn dispatch_click(&mut self, node_id: NodeId) -> Result<(), JsError> {
+    /// Returns `Ok(true)` if the event was not cancelled (defaultPrevented is false),
+    /// or `Ok(false)` if preventDefault() was called.
+    pub fn dispatch_click(&mut self, node_id: NodeId) -> Result<bool, JsError> {
         let _guard = ActiveRuntimeGuard::new(&self.inner);
         dispatch_click_with_context(node_id, &mut self.context)
+    }
+
+    /// Dispatches an event of `event_type` to `target` (or `document`/`window` if None).
+    /// Returns `Ok(true)` if the event was not cancelled (defaultPrevented is false),
+    /// or `Ok(false)` if preventDefault() was called.
+    pub fn dispatch_event(
+        &mut self,
+        target: Option<NodeId>,
+        event_type: &str,
+    ) -> Result<bool, JsError> {
+        let _guard = ActiveRuntimeGuard::new(&self.inner);
+        dispatch_event_with_context(target, event_type, &mut self.context)
     }
 
     /// Updates `window.location` with the given URL.

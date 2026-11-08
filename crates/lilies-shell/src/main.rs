@@ -694,6 +694,8 @@ pub fn run_scripts_for_document(runtime: &mut JsRuntime, base_url: &str) {
             }
         }
     }
+    let _ = runtime.dispatch_event(None, "DOMContentLoaded");
+    let _ = runtime.dispatch_event(None, "load");
 }
 
 /// Cached rendering of the webpage for fast compositing during address bar interaction.
