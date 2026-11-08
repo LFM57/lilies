@@ -3764,11 +3764,19 @@ impl JsRuntime {
                 origin: "",
                 protocol: "https:",
                 port: "",
-                assign: function() {},
-                replace: function() {},
-                reload: function() {}
+                assign: function(url) { this.href = String(url); },
+                replace: function(url) { this.href = String(url); },
+                reload: function() {},
+                toString: function() { return this.href; },
+                valueOf: function() { return this.href; }
             };
+            Object.defineProperty(window.location, Symbol.toPrimitive, {
+                value: function(hint) { return this.href; },
+                configurable: true,
+                writable: true
+            });
             document.location = window.location;
+            globalThis.location = window.location;
 
             window.navigator = {
                 userAgent: "Mozilla/5.0 (X11; Linux x86_64) lilies/0.1.0",
@@ -4335,14 +4343,66 @@ impl JsRuntime {
 
     /// Updates `window.location` with the given URL.
     pub fn set_location_url(&mut self, url: &str) {
-        let search = url.find('?').map(|pos| &url[pos..]).unwrap_or("");
+        let (href, protocol, host, hostname, port, pathname, search, hash, origin) =
+            if let Ok(parsed) = url::Url::parse(url) {
+                let proto = format!("{}:", parsed.scheme());
+                let hname = parsed.host_str().unwrap_or("").to_string();
+                let port_str = parsed.port().map(|p| p.to_string()).unwrap_or_default();
+                let host_str = if port_str.is_empty() {
+                    hname.clone()
+                } else {
+                    format!("{}:{}", hname, port_str)
+                };
+                let path = if parsed.path().is_empty() {
+                    "/".to_string()
+                } else {
+                    parsed.path().to_string()
+                };
+                let q_str = parsed.query().map(|q| format!("?{}", q)).unwrap_or_default();
+                let frag_str = parsed.fragment().map(|f| format!("#{}", f)).unwrap_or_default();
+                let orig = parsed.origin().ascii_serialization();
+                (
+                    parsed.to_string(),
+                    proto,
+                    host_str,
+                    hname,
+                    port_str,
+                    path,
+                    q_str,
+                    frag_str,
+                    orig,
+                )
+            } else {
+                let search = url.find('?').map(|pos| &url[pos..]).unwrap_or("");
+                let hash = url.find('#').map(|pos| &url[pos..]).unwrap_or("");
+                (
+                    url.to_string(),
+                    "https:".to_string(),
+                    "".to_string(),
+                    "".to_string(),
+                    "".to_string(),
+                    "/".to_string(),
+                    search.to_string(),
+                    hash.to_string(),
+                    "".to_string(),
+                )
+            };
+
         let script = format!(
             r#"
             window.location.href = {:?};
+            window.location.protocol = {:?};
+            window.location.host = {:?};
+            window.location.hostname = {:?};
+            window.location.port = {:?};
+            window.location.pathname = {:?};
             window.location.search = {:?};
+            window.location.hash = {:?};
+            window.location.origin = {:?};
             document.location = window.location;
+            globalThis.location = window.location;
             "#,
-            url, search
+            href, protocol, host, hostname, port, pathname, search, hash, origin
         );
         let _ = self.eval(&script);
     }

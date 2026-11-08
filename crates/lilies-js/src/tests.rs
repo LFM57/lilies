@@ -1348,3 +1348,60 @@ fn test_global_web_apis() {
     assert_eq!(p[17], "99"); // CustomEvent.detail
     assert_eq!(p[18], "true"); // fetch function exists
 }
+
+#[test]
+fn test_window_location_properties_and_to_string() {
+    let doc = parse_html("<html><body></body></html>");
+    let mut runtime = JsRuntime::new(doc);
+
+    let url_str = "https://example.com:8443/docs/index.html?lang=en&theme=dark#section2";
+    runtime.set_location_url(url_str);
+
+    let res = runtime
+        .eval(
+            r#"
+        var loc = window.location;
+        var toStr = loc.toString();
+        var strCoerce = String(loc);
+        var concatCoerce = "" + loc;
+
+        var sameDoc = (document.location === window.location);
+        var sameGlobal = (globalThis.location === window.location);
+
+        [
+            loc.href,
+            loc.protocol,
+            loc.host,
+            loc.hostname,
+            loc.port,
+            loc.pathname,
+            loc.search,
+            loc.hash,
+            loc.origin,
+            toStr,
+            strCoerce,
+            concatCoerce,
+            sameDoc,
+            sameGlobal
+        ].join("~~~");
+    "#,
+        )
+        .expect("eval failed");
+
+    let val = res.as_string().map(|s| s.to_std_string_escaped()).unwrap();
+    let p: Vec<&str> = val.split("~~~").collect();
+    assert_eq!(p[0], url_str);
+    assert_eq!(p[1], "https:");
+    assert_eq!(p[2], "example.com:8443");
+    assert_eq!(p[3], "example.com");
+    assert_eq!(p[4], "8443");
+    assert_eq!(p[5], "/docs/index.html");
+    assert_eq!(p[6], "?lang=en&theme=dark");
+    assert_eq!(p[7], "#section2");
+    assert_eq!(p[8], "https://example.com:8443");
+    assert_eq!(p[9], url_str);
+    assert_eq!(p[10], url_str);
+    assert_eq!(p[11], url_str);
+    assert_eq!(p[12], "true");
+    assert_eq!(p[13], "true");
+}

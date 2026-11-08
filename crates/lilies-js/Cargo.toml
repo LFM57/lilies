@@ -11,6 +11,7 @@ lilies-dom = { path = "../lilies-dom" }
 lilies-css = { path = "../lilies-css" }
 lilies-html = { path = "../lilies-html" }
 thiserror.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 lilies-html = { path = "../lilies-html" }
