@@ -647,6 +647,19 @@ fn collect_script_elements(doc: &Document, node_id: NodeId, scripts: &mut Vec<Sc
     if let Some(node) = doc.node(node_id) {
         if let Some(el) = node.as_element() {
             if el.tag_name().eq_ignore_ascii_case("script") {
+                if let Some(type_attr) = el.get_attribute("type") {
+                    let t = type_attr.trim().to_ascii_lowercase();
+                    if !t.is_empty()
+                        && t != "text/javascript"
+                        && t != "application/javascript"
+                        && t != "text/ecmascript"
+                        && t != "application/ecmascript"
+                        && t != "module"
+                    {
+                        return;
+                    }
+                }
+
                 if let Some(src) = el.get_attribute("src") {
                     let trimmed = src.trim();
                     if !trimmed.is_empty() {
@@ -2766,5 +2779,26 @@ mod tests {
         state.reload();
         assert!(!state.stylesheet_cache.contains_key("about:welcome"));
         assert_eq!(state.current_url, "about:welcome");
+    }
+
+    #[test]
+    fn test_ignore_non_javascript_script_types() {
+        let html = r#"<html><body>
+            <span id="t">Initial</span>
+            <script type="application/json">{"bad": syntax for js}</script>
+            <script type="application/ld+json">{"@context": "https://schema.org"}</script>
+            <script type="text/plain">plain text not code</script>
+            <script type="text/javascript">document.getElementById("t").textContent = "Executed";</script>
+            <script>document.getElementById("t").textContent += " OK";</script>
+        </body></html>"#;
+
+        let doc = lilies_html::parse_html(html);
+        let scripts = find_script_elements(&doc);
+        assert_eq!(scripts.len(), 2, "Only the 2 JavaScript scripts should be collected");
+
+        let mut runtime = lilies_js::JsRuntime::new(doc);
+        run_scripts_for_document(&mut runtime, "https://example.com/");
+        let t_id = runtime.find_element_by_id("t").unwrap();
+        assert_eq!(runtime.doc().text_content(t_id), "Executed OK");
     }
 }
