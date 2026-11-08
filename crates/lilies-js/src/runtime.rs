@@ -1485,6 +1485,58 @@ fn element_set_checked(this: &JsValue, args: &[JsValue], _context: &mut Context)
     Ok(JsValue::undefined())
 }
 
+fn element_get_src(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let val = with_current_runtime(|inner| {
+        let v = inner
+            .doc
+            .node(node_id)
+            .and_then(|n| n.as_element())
+            .and_then(|el| el.get_attribute("src"))
+            .map(String::from);
+        Ok(v)
+    })?;
+    Ok(val.map(|s| js_string!(s).into()).unwrap_or_else(|| js_string!("").into()))
+}
+
+fn element_set_src(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    element_set_attribute(this, &[JsValue::new(js_string!("src")), args.get_or_undefined(0).clone()], context)
+}
+
+fn element_get_href(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let val = with_current_runtime(|inner| {
+        let v = inner
+            .doc
+            .node(node_id)
+            .and_then(|n| n.as_element())
+            .and_then(|el| el.get_attribute("href"))
+            .map(String::from);
+        Ok(v)
+    })?;
+    Ok(val.map(|s| js_string!(s).into()).unwrap_or_else(|| js_string!("").into()))
+}
+
+fn element_set_href(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    element_set_attribute(this, &[JsValue::new(js_string!("href")), args.get_or_undefined(0).clone()], context)
+}
+
 fn element_get_disabled(this: &JsValue, _args: &[JsValue], _context: &mut Context) -> JsResult<JsValue> {
     let node_id = get_node_id_from_this(this)?;
     let is_disabled = with_current_runtime(|inner| {
@@ -1897,10 +1949,22 @@ pub fn create_element_object(
     let get_form = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_form))
         .name(js_string!("get form")).build();
 
+    let get_src = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_src))
+        .name(js_string!("get src")).build();
+    let set_src = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_set_src))
+        .name(js_string!("set src")).length(1).build();
+
+    let get_href = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_href))
+        .name(js_string!("get href")).build();
+    let set_href = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_set_href))
+        .name(js_string!("set href")).length(1).build();
+
     let dataset = ObjectInitializer::new(context).build();
     let mut obj_init = ObjectInitializer::with_native_data(ElementNode(node_id), context);
     obj_init
         .accessor(js_string!("textContent"), Some(get_text), Some(set_text), Attribute::all())
+        .accessor(js_string!("src"), Some(get_src), Some(set_src), Attribute::all())
+        .accessor(js_string!("href"), Some(get_href), Some(set_href), Attribute::all())
         .accessor(js_string!("parentNode"), Some(get_parent.clone()), None, Attribute::all())
         .accessor(js_string!("parentElement"), Some(get_parent), None, Attribute::all())
         .accessor(js_string!("children"), Some(get_children.clone()), None, Attribute::all())
@@ -2468,10 +2532,17 @@ impl JsRuntime {
             window.addEventListener = function(evt, handler) {};
             window.removeEventListener = function(evt, handler) {};
 
-            window.Image = function() {
-                this.src = "";
-                this.width = 0;
-                this.height = 0;
+            window.Image = function(width, height) {
+                var img = __create_element("img");
+                if (width !== undefined) {
+                    img.setAttribute("width", String(width));
+                    img.width = width;
+                }
+                if (height !== undefined) {
+                    img.setAttribute("height", String(height));
+                    img.height = height;
+                }
+                return img;
             };
 
             document.defaultView = window;

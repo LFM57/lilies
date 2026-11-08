@@ -786,3 +786,37 @@ fn test_form_submit_and_named_input_collision() {
         Some("true|true|true|Sign In|true|alice|false".to_string())
     );
 }
+
+#[test]
+fn test_window_image_dom_element() {
+    let doc = parse_html("<html><body></body></html>");
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        var img = new Image(100, 200);
+        img.src = "https://example.com/test.png";
+        img.setAttribute("alt", "Test Image");
+        img.classList.add("responsive");
+        document.body.appendChild(img);
+
+        var appended = document.body.querySelector("img");
+
+        [
+            img.tagName,
+            img.src,
+            img.getAttribute("alt"),
+            img.classList.contains("responsive"),
+            appended === img,
+            typeof img.addEventListener === 'function'
+        ].join("|");
+    "#,
+        )
+        .expect("eval failed");
+
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("IMG|https://example.com/test.png|Test Image|true|true|true".to_string())
+    );
+}
