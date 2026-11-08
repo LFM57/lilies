@@ -640,3 +640,38 @@ fn test_get_computed_style_and_match_media() {
         Some("flex|rgb(0, 128, 0)|20px|false|true".to_string())
     );
 }
+
+#[test]
+fn test_document_creation_and_helper_methods() {
+    let doc = Document::new();
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        var frag = document.createDocumentFragment();
+        var comment = document.createComment("a test comment");
+        var evt = document.createEvent("Event");
+        evt.initEvent("custom", true, true);
+        evt.preventDefault();
+        var focused = document.hasFocus();
+
+        [
+            frag !== null,
+            typeof frag.appendChild === 'function',
+            comment !== null,
+            evt.type,
+            evt.bubbles,
+            evt.defaultPrevented,
+            focused,
+            typeof document.write === 'function'
+        ].join("|");
+    "#,
+        )
+        .expect("eval failed");
+
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("true|true|true|custom|true|true|true|true".to_string())
+    );
+}

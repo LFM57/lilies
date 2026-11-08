@@ -315,6 +315,33 @@ fn document_create_text_node(
     Ok(JsValue::new(obj))
 }
 
+fn document_create_comment(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let text = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let new_node_id = with_current_runtime(|inner| {
+        inner.dirty = true;
+        Ok(inner.doc.create_comment(&text))
+    })?;
+    let obj = get_or_create_element_object(new_node_id, context)?;
+    Ok(JsValue::new(obj))
+}
+
+fn document_create_document_fragment(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let new_node_id = with_current_runtime(|inner| {
+        inner.dirty = true;
+        Ok(inner.doc.create_document_fragment())
+    })?;
+    let obj = get_or_create_element_object(new_node_id, context)?;
+    Ok(JsValue::new(obj))
+}
+
 fn wrap_elements_as_collection(node_ids: Vec<NodeId>, context: &mut Context) -> JsResult<JsValue> {
     let array = JsArray::new(context);
     for node_id in node_ids {
@@ -1730,6 +1757,16 @@ impl JsRuntime {
             NativeFunction::from_fn_ptr(document_create_text_node),
         );
         let _ = context.register_global_callable(
+            js_string!("__create_comment"),
+            1,
+            NativeFunction::from_fn_ptr(document_create_comment),
+        );
+        let _ = context.register_global_callable(
+            js_string!("__create_document_fragment"),
+            0,
+            NativeFunction::from_fn_ptr(document_create_document_fragment),
+        );
+        let _ = context.register_global_callable(
             js_string!("__get_elements_by_tag_name"),
             1,
             NativeFunction::from_fn_ptr(document_get_elements_by_tag_name),
@@ -1970,6 +2007,25 @@ impl JsRuntime {
 
             document.createElement = function(tag) { return __create_element(tag); };
             document.createTextNode = function(text) { return __create_text_node(text); };
+            document.createComment = function(text) { return __create_comment(text); };
+            document.createDocumentFragment = function() { return __create_document_fragment(); };
+            document.createEvent = function(type) {
+                return {
+                    type: type || "",
+                    bubbles: false,
+                    cancelable: false,
+                    defaultPrevented: false,
+                    initEvent: function(t, b, c) {
+                        this.type = t;
+                        this.bubbles = !!b;
+                        this.cancelable = !!c;
+                    },
+                    preventDefault: function() { this.defaultPrevented = true; }
+                };
+            };
+            document.hasFocus = function() { return true; };
+            document.write = function(str) {};
+            document.writeln = function(str) {};
             document.getElementsByTagName = function(tag) { return __get_elements_by_tag_name(tag); };
 
             globalThis.__createClickEvent = function(target, currentTarget) {
