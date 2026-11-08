@@ -1240,3 +1240,111 @@ fn test_child_nodes_text_nodes_and_node_types() {
     assert_eq!(p[28], "9"); // Node.DOCUMENT_NODE
     assert!(runtime.is_dirty(), "Runtime must be dirty after nodeValue mutation");
 }
+
+#[test]
+fn test_global_web_apis() {
+    let doc = parse_html(r#"<html><body><div id="target">Content</div></body></html>"#);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        // 1. Performance
+        var pNow = performance.now();
+        var pNowIsNum = typeof pNow === 'number' && pNow >= 0;
+
+        // 2. LocalStorage & SessionStorage
+        localStorage.setItem("user", "Alice");
+        localStorage.theme = "dark";
+        var lsUser = localStorage.getItem("user");
+        var lsTheme = localStorage.getItem("theme");
+        var lsLen = localStorage.length;
+        localStorage.removeItem("user");
+        var lsUserAfterRemove = localStorage.getItem("user");
+
+        sessionStorage.setItem("token", "xyz");
+        var ssToken = sessionStorage.getItem("token");
+
+        // 3. History
+        history.pushState({ page: 1 }, "Page 1", "/page1?foo=bar#sec");
+        var histState = history.state.page;
+
+        // 4. btoa / atob
+        var encoded = btoa("Hello, world!");
+        var decoded = atob(encoded);
+
+        // 5. URL & URLSearchParams
+        var u = new URL("https://example.com:8080/test/path?q=search&lang=en#heading");
+        var uProto = u.protocol;
+        var uHost = u.host;
+        var uHostname = u.hostname;
+        var uPort = u.port;
+        var uOrigin = u.origin;
+        var uPath = u.pathname;
+        var uSearch = u.search;
+        var uHash = u.hash;
+        var uParamQ = u.searchParams.get("q");
+
+        u.searchParams.set("q", "rust");
+        u.searchParams.append("new_key", "val");
+        var uNewSearch = u.search;
+
+        // 6. Event and CustomEvent with dispatchEvent
+        var target = document.getElementById("target");
+        var detailReceived = null;
+        target.addEventListener("my-event", function(e) {
+            detailReceived = e.detail ? e.detail.score : null;
+        });
+        var customEv = new CustomEvent("my-event", { detail: { score: 99 } });
+        target.dispatchEvent(customEv);
+
+        // 7. fetch
+        var fetchExists = typeof fetch === 'function';
+
+        [
+            pNowIsNum,
+            lsUser,
+            lsTheme,
+            lsLen,
+            lsUserAfterRemove === null,
+            ssToken,
+            histState,
+            encoded,
+            decoded,
+            uProto,
+            uHost,
+            uHostname,
+            uPort,
+            uOrigin,
+            uPath,
+            uParamQ,
+            uNewSearch,
+            detailReceived,
+            fetchExists
+        ].join("~~~");
+    "#,
+        )
+        .expect("eval failed");
+
+    let val = res.as_string().map(|s| s.to_std_string_escaped()).unwrap();
+    let p: Vec<&str> = val.split("~~~").collect();
+    assert_eq!(p[0], "true"); // performance.now()
+    assert_eq!(p[1], "Alice"); // localStorage.getItem
+    assert_eq!(p[2], "dark"); // localStorage.theme
+    assert_eq!(p[3], "2"); // localStorage.length
+    assert_eq!(p[4], "true"); // localStorage.removeItem
+    assert_eq!(p[5], "xyz"); // sessionStorage
+    assert_eq!(p[6], "1"); // history.state
+    assert_eq!(p[7], "SGVsbG8sIHdvcmxkIQ=="); // btoa
+    assert_eq!(p[8], "Hello, world!"); // atob
+    assert_eq!(p[9], "https:");
+    assert_eq!(p[10], "example.com:8080");
+    assert_eq!(p[11], "example.com");
+    assert_eq!(p[12], "8080");
+    assert_eq!(p[13], "https://example.com:8080");
+    assert_eq!(p[14], "/test/path");
+    assert_eq!(p[15], "search");
+    assert_eq!(p[16], "?q=rust&lang=en&new_key=val");
+    assert_eq!(p[17], "99"); // CustomEvent.detail
+    assert_eq!(p[18], "true"); // fetch function exists
+}

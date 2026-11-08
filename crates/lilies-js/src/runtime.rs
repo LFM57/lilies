@@ -1088,7 +1088,12 @@ fn element_dispatch_event(
             .map(|s| s.to_std_string_escaped())
             .unwrap_or_else(|_| "custom".to_string())
     };
-    let allowed = dispatch_event_with_context(Some(node_id), &event_type, context)?;
+    let event_val = if event_obj.is_object() {
+        Some(event_obj.clone())
+    } else {
+        None
+    };
+    let allowed = dispatch_event_with_context(Some(node_id), &event_type, event_val, context)?;
     Ok(JsValue::new(allowed))
 }
 
@@ -1160,7 +1165,12 @@ fn document_dispatch_event(
             .map(|s| s.to_std_string_escaped())
             .unwrap_or_else(|_| "custom".to_string())
     };
-    let allowed = dispatch_event_with_context(None, &event_type, context)?;
+    let event_val = if event_obj.is_object() {
+        Some(event_obj.clone())
+    } else {
+        None
+    };
+    let allowed = dispatch_event_with_context(None, &event_type, event_val, context)?;
     Ok(JsValue::new(allowed))
 }
 
@@ -1232,8 +1242,24 @@ fn window_dispatch_event(
             .map(|s| s.to_std_string_escaped())
             .unwrap_or_else(|_| "custom".to_string())
     };
-    let allowed = dispatch_event_with_context(None, &event_type, context)?;
+    let event_val = if event_obj.is_object() {
+        Some(event_obj.clone())
+    } else {
+        None
+    };
+    let allowed = dispatch_event_with_context(None, &event_type, event_val, context)?;
     Ok(JsValue::new(allowed))
+}
+
+fn native_performance_now(
+    _this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let elapsed = with_current_runtime(|inner| {
+        Ok(inner.start_time.elapsed().as_secs_f64() * 1000.0)
+    })?;
+    Ok(JsValue::new(elapsed))
 }
 
 fn native_set_timeout(
@@ -2555,10 +2581,11 @@ fn dispatch_click_with_context(node_id: NodeId, context: &mut Context) -> JsResu
 fn dispatch_event_with_context(
     target: Option<NodeId>,
     event_type: &str,
+    event_val_override: Option<JsValue>,
     context: &mut Context,
 ) -> JsResult<bool> {
     let lower_type = event_type.to_ascii_lowercase();
-    if target.is_some() && lower_type == "click" {
+    if target.is_some() && lower_type == "click" && event_val_override.is_none() {
         return dispatch_click_with_context(target.unwrap(), context);
     }
 
@@ -2596,7 +2623,13 @@ fn dispatch_event_with_context(
         .global_object()
         .get(js_string!("__createCustomEvent"), context)?;
 
-    let event_val = if let Some(create_fn) = create_event_fn.as_callable() {
+    let event_val = if let Some(ev) = event_val_override {
+        if let Some(ev_obj) = ev.as_object() {
+            let _ = ev_obj.set(js_string!("target"), target_val.clone(), false, context);
+            let _ = ev_obj.set(js_string!("srcElement"), target_val.clone(), false, context);
+        }
+        ev
+    } else if let Some(create_fn) = create_event_fn.as_callable() {
         create_fn.call(
             &JsValue::undefined(),
             &[
@@ -2608,6 +2641,15 @@ fn dispatch_event_with_context(
         )?
     } else {
         JsValue::undefined()
+    };
+
+    let bubbles = if let Some(ev_obj) = event_val.as_object() {
+        ev_obj
+            .get(js_string!("bubbles"), context)
+            .map(|v| v.to_boolean())
+            .unwrap_or(true)
+    } else {
+        true
     };
 
     let mut stopped = false;
@@ -2641,7 +2683,7 @@ fn dispatch_event_with_context(
             if !cbs.is_empty() {
                 ancestor_chain.push((curr_id, cbs));
             }
-            current = parent_id;
+            current = if bubbles { parent_id } else { None };
         }
 
         for (curr_id, cbs) in ancestor_chain {
@@ -2680,6 +2722,18 @@ fn dispatch_event_with_context(
                 return Ok(!default_prevented);
             }
         }
+    }
+
+    if !bubbles && target.is_some() {
+        let default_prevented = if let Some(ev_obj) = event_val.as_object() {
+            ev_obj
+                .get(js_string!("defaultPrevented"), context)
+                .map(|v| v.to_boolean())
+                .unwrap_or(false)
+        } else {
+            false
+        };
+        return Ok(!default_prevented);
     }
 
     // Document listeners
@@ -3414,6 +3468,11 @@ impl JsRuntime {
             NativeFunction::from_fn_ptr(native_cancel_animation_frame),
         );
         let _ = context.register_global_callable(
+            js_string!("__performance_now"),
+            0,
+            NativeFunction::from_fn_ptr(native_performance_now),
+        );
+        let _ = context.register_global_callable(
             js_string!("__set_style_internal"),
             3,
             NativeFunction::from_fn_ptr(internal_set_style),
@@ -3729,6 +3788,398 @@ impl JsRuntime {
                 pixelDepth: 24
             };
 
+            window.performance = {
+                now: function() { return __performance_now(); },
+                timeOrigin: Date.now(),
+                timing: {
+                    navigationStart: Date.now(),
+                    fetchStart: Date.now(),
+                    domLoading: Date.now(),
+                    domInteractive: Date.now(),
+                    domContentLoadedEventStart: Date.now(),
+                    domContentLoadedEventEnd: Date.now(),
+                    domComplete: Date.now(),
+                    loadEventStart: Date.now(),
+                    loadEventEnd: Date.now()
+                }
+            };
+            globalThis.performance = window.performance;
+
+            function __createStorage() {
+                var store = Object.create(null);
+                var storageObj = {
+                    getItem: function(key) {
+                        var k = String(key);
+                        return (k in store) ? store[k] : null;
+                    },
+                    setItem: function(key, val) {
+                        var k = String(key);
+                        store[k] = String(val);
+                    },
+                    removeItem: function(key) {
+                        var k = String(key);
+                        delete store[k];
+                    },
+                    clear: function() {
+                        store = Object.create(null);
+                    },
+                    key: function(idx) {
+                        var keys = Object.keys(store);
+                        return idx >= 0 && idx < keys.length ? keys[idx] : null;
+                    },
+                    get length() {
+                        return Object.keys(store).length;
+                    }
+                };
+                return new Proxy(storageObj, {
+                    get: function(target, prop) {
+                        if (typeof prop === 'string') {
+                            if (prop in target) return target[prop];
+                            return (prop in store) ? store[prop] : undefined;
+                        }
+                        return target[prop];
+                    },
+                    set: function(target, prop, value) {
+                        if (typeof prop === 'string') {
+                            if (prop in target) {
+                                target[prop] = value;
+                                return true;
+                            }
+                            store[prop] = String(value);
+                            return true;
+                        }
+                        target[prop] = value;
+                        return true;
+                    },
+                    deleteProperty: function(target, prop) {
+                        if (typeof prop === 'string' && prop in store) {
+                            delete store[prop];
+                            return true;
+                        }
+                        delete target[prop];
+                        return true;
+                    }
+                });
+            }
+            window.localStorage = __createStorage();
+            window.sessionStorage = __createStorage();
+            globalThis.localStorage = window.localStorage;
+            globalThis.sessionStorage = window.sessionStorage;
+
+            window.history = {
+                length: 1,
+                state: null,
+                scrollRestoration: "auto",
+                pushState: function(state, unused, url) {
+                    this.state = state;
+                    if (url) {
+                        try {
+                            var u = new URL(url, window.location.href || "https://localhost/");
+                            window.location.href = u.href;
+                            window.location.pathname = u.pathname;
+                            window.location.search = u.search;
+                            window.location.hash = u.hash;
+                        } catch (e) {}
+                    }
+                },
+                replaceState: function(state, unused, url) {
+                    this.state = state;
+                    if (url) {
+                        try {
+                            var u = new URL(url, window.location.href || "https://localhost/");
+                            window.location.href = u.href;
+                            window.location.pathname = u.pathname;
+                            window.location.search = u.search;
+                            window.location.hash = u.hash;
+                        } catch (e) {}
+                    }
+                },
+                back: function() {},
+                forward: function() {},
+                go: function(delta) {}
+            };
+            globalThis.history = window.history;
+
+            var _b64chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+            window.btoa = function(input) {
+                var str = String(input);
+                var output = '';
+                for (var i = 0; i < str.length; i += 3) {
+                    var c1 = str.charCodeAt(i);
+                    var c2 = i + 1 < str.length ? str.charCodeAt(i + 1) : NaN;
+                    var c3 = i + 2 < str.length ? str.charCodeAt(i + 2) : NaN;
+                    if (c1 > 255 || c2 > 255 || c3 > 255) {
+                        throw new Error("InvalidCharacterError: String contains characters outside the Latin1 range");
+                    }
+                    var n = (c1 << 16) | (isNaN(c2) ? 0 : c2 << 8) | (isNaN(c3) ? 0 : c3);
+                    output += _b64chars.charAt((n >> 18) & 63);
+                    output += _b64chars.charAt((n >> 12) & 63);
+                    output += isNaN(c2) ? '=' : _b64chars.charAt((n >> 6) & 63);
+                    output += isNaN(c3) ? '=' : _b64chars.charAt(n & 63);
+                }
+                return output;
+            };
+            window.atob = function(input) {
+                var str = String(input).replace(/[\t\n\f\r ]+/g, '');
+                var output = '';
+                for (var i = 0; i < str.length; i += 4) {
+                    var enc1 = _b64chars.indexOf(str.charAt(i));
+                    var enc2 = _b64chars.indexOf(str.charAt(i + 1));
+                    var enc3 = str.charAt(i + 2) === '=' ? 64 : _b64chars.indexOf(str.charAt(i + 2));
+                    var enc4 = str.charAt(i + 3) === '=' ? 64 : _b64chars.indexOf(str.charAt(i + 3));
+                    if (enc1 === -1 || enc2 === -1 || (enc3 === -1 && enc3 !== 64) || (enc4 === -1 && enc4 !== 64)) {
+                        throw new Error("InvalidCharacterError: Invalid base64 character");
+                    }
+                    var chr1 = (enc1 << 2) | (enc2 >> 4);
+                    output += String.fromCharCode(chr1);
+                    if (enc3 !== 64) {
+                        var chr2 = ((enc2 & 15) << 4) | (enc3 >> 2);
+                        output += String.fromCharCode(chr2);
+                    }
+                    if (enc4 !== 64) {
+                        var chr3 = ((enc3 & 3) << 6) | enc4;
+                        output += String.fromCharCode(chr3);
+                    }
+                }
+                return output;
+            };
+            globalThis.btoa = window.btoa;
+            globalThis.atob = window.atob;
+
+            function URLSearchParams(init) {
+                var params = [];
+                if (typeof init === 'string') {
+                    var str = init;
+                    if (str.charAt(0) === '?') str = str.slice(1);
+                    if (str.length > 0) {
+                        var pairs = str.split('&');
+                        for (var i = 0; i < pairs.length; i++) {
+                            var p = pairs[i];
+                            var eq = p.indexOf('=');
+                            if (eq !== -1) {
+                                params.push([decodeURIComponent(p.slice(0, eq).replace(/\+/g, ' ')), decodeURIComponent(p.slice(eq + 1).replace(/\+/g, ' '))]);
+                            } else {
+                                params.push([decodeURIComponent(p.replace(/\+/g, ' ')), '']);
+                            }
+                        }
+                    }
+                } else if (Array.isArray(init)) {
+                    for (var i = 0; i < init.length; i++) {
+                        params.push([String(init[i][0]), String(init[i][1])]);
+                    }
+                } else if (init && typeof init === 'object') {
+                    for (var k in init) {
+                        params.push([String(k), String(init[k])]);
+                    }
+                }
+                this.append = function(name, value) {
+                    params.push([String(name), String(value)]);
+                };
+                this.delete = function(name) {
+                    var n = String(name);
+                    params = params.filter(function(pair) { return pair[0] !== n; });
+                };
+                this.get = function(name) {
+                    var n = String(name);
+                    for (var i = 0; i < params.length; i++) {
+                        if (params[i][0] === n) return params[i][1];
+                    }
+                    return null;
+                };
+                this.getAll = function(name) {
+                    var n = String(name);
+                    var res = [];
+                    for (var i = 0; i < params.length; i++) {
+                        if (params[i][0] === n) res.push(params[i][1]);
+                    }
+                    return res;
+                };
+                this.has = function(name) {
+                    var n = String(name);
+                    for (var i = 0; i < params.length; i++) {
+                        if (params[i][0] === n) return true;
+                    }
+                    return false;
+                };
+                this.set = function(name, value) {
+                    var n = String(name);
+                    var v = String(value);
+                    var found = false;
+                    var newParams = [];
+                    for (var i = 0; i < params.length; i++) {
+                        if (params[i][0] === n) {
+                            if (!found) {
+                                newParams.push([n, v]);
+                                found = true;
+                            }
+                        } else {
+                            newParams.push(params[i]);
+                        }
+                    }
+                    if (!found) newParams.push([n, v]);
+                    params = newParams;
+                };
+                this.forEach = function(cb, thisArg) {
+                    for (var i = 0; i < params.length; i++) {
+                        cb.call(thisArg, params[i][1], params[i][0], this);
+                    }
+                };
+                this.toString = function() {
+                    return params.map(function(pair) {
+                        return encodeURIComponent(pair[0]) + '=' + encodeURIComponent(pair[1]);
+                    }).join('&');
+                };
+                this.entries = function*() {
+                    for (var i = 0; i < params.length; i++) {
+                        yield [params[i][0], params[i][1]];
+                    }
+                };
+                this[Symbol.iterator] = this.entries;
+                Object.defineProperty(this, 'size', {
+                    get: function() { return params.length; }
+                });
+            }
+            window.URLSearchParams = URLSearchParams;
+            globalThis.URLSearchParams = URLSearchParams;
+
+            function URL(url, base) {
+                var rawUrl = String(url);
+                var resolved;
+                if (base !== undefined) {
+                    var baseStr = String(base);
+                    if (rawUrl.indexOf('://') !== -1) {
+                        resolved = rawUrl;
+                    } else if (rawUrl.startsWith('//')) {
+                        var protoIdx = baseStr.indexOf('://');
+                        var proto = protoIdx !== -1 ? baseStr.slice(0, protoIdx + 1) : 'https:';
+                        resolved = proto + rawUrl;
+                    } else if (rawUrl.startsWith('/')) {
+                        var m = baseStr.match(/^([a-zA-Z]+:\/\/[^\/]+)/);
+                        var origin = m ? m[1] : baseStr;
+                        resolved = origin + rawUrl;
+                    } else {
+                        var slashIdx = baseStr.lastIndexOf('/');
+                        if (slashIdx !== -1 && slashIdx > baseStr.indexOf('://') + 2) {
+                            resolved = baseStr.slice(0, slashIdx + 1) + rawUrl;
+                        } else {
+                            resolved = baseStr + '/' + rawUrl;
+                        }
+                    }
+                } else {
+                    resolved = rawUrl;
+                }
+
+                var parseRegex = /^([a-zA-Z]+:)?(\/\/([^\/?#:]+)(?::(\d+))?)?([^?#]*)(\?[^#]*)?(#.*)?$/;
+                var match = resolved.match(parseRegex) || [];
+
+                var protocol = match[1] || "";
+                var hostname = match[3] || "";
+                var port = match[4] || "";
+                var host = hostname + (port ? ":" + port : "");
+                var origin = (protocol && host) ? (protocol + "//" + host) : "";
+                var pathname = match[5] || "/";
+                if (pathname.length === 0 && origin) pathname = "/";
+                var search = match[6] || "";
+                var hash = match[7] || "";
+
+                var searchParams = new URLSearchParams(search);
+
+                this.protocol = protocol;
+                this.host = host;
+                this.hostname = hostname;
+                this.port = port;
+                this.origin = origin;
+                this.pathname = pathname;
+                this.hash = hash;
+                this.searchParams = searchParams;
+
+                Object.defineProperty(this, 'search', {
+                    get: function() {
+                        var s = searchParams.toString();
+                        return s ? "?" + s : "";
+                    },
+                    set: function(v) {
+                        search = v;
+                        this.searchParams = new URLSearchParams(v);
+                    }
+                });
+
+                Object.defineProperty(this, 'href', {
+                    get: function() {
+                        var p = this.protocol ? this.protocol + "//" + this.host : "";
+                        return p + this.pathname + this.search + this.hash;
+                    },
+                    set: function(v) {
+                        var u = new URL(v);
+                        this.protocol = u.protocol;
+                        this.host = u.host;
+                        this.hostname = u.hostname;
+                        this.port = u.port;
+                        this.origin = u.origin;
+                        this.pathname = u.pathname;
+                        this.search = u.search;
+                        this.hash = u.hash;
+                    }
+                });
+
+                this.toString = function() {
+                    return this.href;
+                };
+                this.toJSON = function() {
+                    return this.href;
+                };
+            }
+            window.URL = URL;
+            globalThis.URL = URL;
+
+            function Event(type, options) {
+                options = options || {};
+                this.type = String(type || "");
+                this.bubbles = !!options.bubbles;
+                this.cancelable = !!options.cancelable;
+                this.defaultPrevented = false;
+                this.target = null;
+                this.currentTarget = null;
+                this.srcElement = null;
+                this.cancelBubble = false;
+                this._stopped = false;
+                this.preventDefault = function() {
+                    if (this.cancelable !== false) this.defaultPrevented = true;
+                };
+                this.stopPropagation = function() {
+                    this._stopped = true;
+                    this.cancelBubble = true;
+                };
+            }
+            window.Event = Event;
+            globalThis.Event = Event;
+
+            function CustomEvent(type, options) {
+                Event.call(this, type, options);
+                this.detail = (options && options.detail !== undefined) ? options.detail : null;
+            }
+            CustomEvent.prototype = Object.create(Event.prototype);
+            CustomEvent.prototype.constructor = CustomEvent;
+            window.CustomEvent = CustomEvent;
+            globalThis.CustomEvent = CustomEvent;
+
+            window.fetch = function(url, options) {
+                return Promise.resolve({
+                    ok: true,
+                    status: 200,
+                    statusText: "OK",
+                    url: String(url),
+                    text: function() { return Promise.resolve(""); },
+                    json: function() { return Promise.resolve({}); },
+                    blob: function() { return Promise.resolve(null); },
+                    headers: {
+                        get: function() { return null; },
+                        has: function() { return false; }
+                    }
+                });
+            };
+            globalThis.fetch = window.fetch;
+
             window.addEventListener = function(evt, handler) {
                 __window_add_event_listener(evt, handler);
             };
@@ -3836,31 +4287,19 @@ impl JsRuntime {
             document.getElementsByTagName = function(tag) { return __get_elements_by_tag_name(tag); };
 
             globalThis.__createClickEvent = function(target, currentTarget) {
-                return {
-                    type: "click",
-                    target: target,
-                    currentTarget: currentTarget,
-                    srcElement: target,
-                    defaultPrevented: false,
-                    cancelBubble: false,
-                    _stopped: false,
-                    preventDefault: function() { this.defaultPrevented = true; },
-                    stopPropagation: function() { this._stopped = true; this.cancelBubble = true; }
-                };
+                var ev = new CustomEvent("click", { bubbles: true, cancelable: true });
+                ev.target = target;
+                ev.currentTarget = currentTarget;
+                ev.srcElement = target;
+                return ev;
             };
 
             globalThis.__createCustomEvent = function(type, target, currentTarget) {
-                return {
-                    type: type || "",
-                    target: target,
-                    currentTarget: currentTarget,
-                    srcElement: target,
-                    defaultPrevented: false,
-                    cancelBubble: false,
-                    _stopped: false,
-                    preventDefault: function() { this.defaultPrevented = true; },
-                    stopPropagation: function() { this._stopped = true; this.cancelBubble = true; }
-                };
+                var ev = new CustomEvent(type, { bubbles: true, cancelable: true });
+                ev.target = target;
+                ev.currentTarget = currentTarget;
+                ev.srcElement = target;
+                return ev;
             };
         "##;
         let _ = context.eval(Source::from_bytes(browser_preamble.as_bytes()));
@@ -3891,7 +4330,7 @@ impl JsRuntime {
         event_type: &str,
     ) -> Result<bool, JsError> {
         let _guard = ActiveRuntimeGuard::new(&self.inner);
-        dispatch_event_with_context(target, event_type, &mut self.context)
+        dispatch_event_with_context(target, event_type, None, &mut self.context)
     }
 
     /// Updates `window.location` with the given URL.
