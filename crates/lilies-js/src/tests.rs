@@ -675,3 +675,66 @@ fn test_document_creation_and_helper_methods() {
         Some("true|true|true|custom|true|true|true|true".to_string())
     );
 }
+
+#[test]
+fn test_element_manipulation_traversal_and_class_list() {
+    let html = r#"<html><body><div id="parent"><span id="child" class="btn active">Item</span><p id="sibling">Other</p></div></body></html>"#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        var parent = document.getElementById("parent");
+        var child = document.getElementById("child");
+        var sibling = document.getElementById("sibling");
+
+        // classList tests
+        child.classList.add("primary", "highlight");
+        var hasActive = child.classList.contains("active");
+        child.classList.remove("active");
+        var hasActiveAfterRemove = child.classList.contains("active");
+        var toggledOff = child.classList.toggle("btn");
+        var toggledOn = child.classList.toggle("btn");
+        var classString = child.classList.toString();
+
+        // contains tests
+        var parentContainsChild = parent.contains(child);
+        var childContainsParent = child.contains(parent);
+
+        // cloneNode tests
+        var cloned = child.cloneNode(true);
+        var clonedHasClass = cloned.classList.contains("primary");
+
+        // replaceChild tests
+        parent.replaceChild(cloned, sibling);
+        var siblingDetached = sibling.parentNode === null;
+
+        // insertAdjacentHTML tests
+        child.insertAdjacentHTML("afterend", "<b>Bold</b>");
+
+        // remove test
+        child.remove();
+        var childRemoved = child.parentNode === null;
+
+        [
+            hasActive,
+            hasActiveAfterRemove,
+            toggledOff,
+            toggledOn,
+            classString.indexOf("primary") !== -1,
+            parentContainsChild,
+            childContainsParent,
+            clonedHasClass,
+            siblingDetached,
+            childRemoved
+        ].join("|");
+    "#,
+        )
+        .expect("eval failed");
+
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("true|false|false|true|true|true|false|true|true|true".to_string())
+    );
+}

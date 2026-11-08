@@ -916,6 +916,371 @@ fn element_insert_before(
     Ok(new_child_val.clone())
 }
 
+fn element_remove(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    with_current_runtime(|inner| {
+        if let Some(node) = inner.doc.node(node_id) {
+            if let Some(parent) = node.parent {
+                let _ = inner.doc.remove_child(parent, node_id);
+                inner.dirty = true;
+            }
+        }
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
+}
+
+fn element_replace_child(
+    this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let parent_id = get_node_id_from_this(this)?;
+    let new_child_val = args.get_or_undefined(0);
+    let old_child_val = args.get_or_undefined(1);
+    let new_child_id = get_node_id_from_this(new_child_val)?;
+    let old_child_id = get_node_id_from_this(old_child_val)?;
+
+    with_current_runtime(|inner| {
+        inner
+            .doc
+            .replace_child(parent_id, new_child_id, old_child_id)
+            .map_err(|e| JsNativeError::typ().with_message(format!("replaceChild failed: {e:?}")))?;
+        inner.dirty = true;
+        Ok(())
+    })?;
+
+    Ok(old_child_val.clone())
+}
+
+fn element_clone_node(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let deep = args.get_or_undefined(0).to_boolean();
+
+    let cloned_id = with_current_runtime(|inner| {
+        inner
+            .doc
+            .clone_node(node_id, deep)
+            .ok_or_else(|| JsNativeError::typ().with_message("cloneNode failed").into())
+    })?;
+
+    let obj = get_or_create_element_object(cloned_id, context)?;
+    Ok(JsValue::new(obj))
+}
+
+fn element_contains(
+    this: &JsValue,
+    args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let other_val = args.get_or_undefined(0);
+    let Ok(other_id) = get_node_id_from_this(other_val) else {
+        return Ok(JsValue::new(false));
+    };
+
+    let contains = with_current_runtime(|inner| {
+        let mut curr = Some(other_id);
+        while let Some(curr_id) = curr {
+            if curr_id == node_id {
+                return Ok(true);
+            }
+            curr = inner.doc.node(curr_id).and_then(|n| n.parent);
+        }
+        Ok(false)
+    })?;
+
+    Ok(JsValue::new(contains))
+}
+
+fn import_node_into_doc(
+    src_doc: &Document,
+    src_id: NodeId,
+    target_doc: &mut Document,
+) -> Option<NodeId> {
+    let src_node = src_doc.node(src_id)?;
+    let new_id = match &src_node.node_type {
+        lilies_dom::NodeType::Element(el) => {
+            target_doc.create_element(&el.tag_name, el.attributes.clone())
+        }
+        lilies_dom::NodeType::Text(t) => target_doc.create_text(&t.data),
+        lilies_dom::NodeType::Comment(c) => target_doc.create_comment(c),
+        lilies_dom::NodeType::DocumentFragment => target_doc.create_document_fragment(),
+        lilies_dom::NodeType::DocumentType(dt) => {
+            target_doc.create_doctype(&dt.name, dt.public_id.clone(), dt.system_id.clone())
+        }
+        lilies_dom::NodeType::Document => return None,
+    };
+
+    for child in src_doc.get_children(src_id) {
+        if let Some(imported_child) = import_node_into_doc(src_doc, child, target_doc) {
+            let _ = target_doc.append_child(new_id, imported_child);
+        }
+    }
+
+    Some(new_id)
+}
+
+fn element_insert_adjacent_html(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let position = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped()
+        .to_ascii_lowercase();
+    let html_text = args
+        .get_or_undefined(1)
+        .to_string(context)?
+        .to_std_string_escaped();
+
+    let parsed_doc = lilies_html::parse_html(&html_text);
+    let fragment_children = parsed_doc.get_children(parsed_doc.root());
+
+    with_current_runtime(|inner| {
+        let mut imported_nodes = Vec::new();
+        for child in fragment_children {
+            if let Some(cloned) = import_node_into_doc(&parsed_doc, child, &mut inner.doc) {
+                imported_nodes.push(cloned);
+            }
+        }
+
+        match position.as_str() {
+            "beforebegin" => {
+                if let Some(parent) = inner.doc.node(node_id).and_then(|n| n.parent) {
+                    for imported in imported_nodes {
+                        let _ = inner.doc.insert_before(parent, imported, node_id);
+                    }
+                    inner.dirty = true;
+                }
+            }
+            "afterbegin" => {
+                let first_child = inner.doc.node(node_id).and_then(|n| n.first_child);
+                for imported in imported_nodes {
+                    if let Some(fc) = first_child {
+                        let _ = inner.doc.insert_before(node_id, imported, fc);
+                    } else {
+                        let _ = inner.doc.append_child(node_id, imported);
+                    }
+                }
+                inner.dirty = true;
+            }
+            "beforeend" => {
+                for imported in imported_nodes {
+                    let _ = inner.doc.append_child(node_id, imported);
+                }
+                inner.dirty = true;
+            }
+            "afterend" => {
+                if let Some(parent) = inner.doc.node(node_id).and_then(|n| n.parent) {
+                    let next_sibling = inner.doc.node(node_id).and_then(|n| n.next_sibling);
+                    for imported in imported_nodes {
+                        if let Some(ns) = next_sibling {
+                            let _ = inner.doc.insert_before(parent, imported, ns);
+                        } else {
+                            let _ = inner.doc.append_child(parent, imported);
+                        }
+                    }
+                    inner.dirty = true;
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    })?;
+
+    Ok(JsValue::undefined())
+}
+
+fn internal_class_list_add(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_idx = args.get_or_undefined(0).to_u32(context)? as usize;
+    let node_id = NodeId(node_idx);
+    let tokens_str = args.get_or_undefined(1).to_string(context)?.to_std_string_escaped();
+    let to_add: Vec<&str> = tokens_str.split_ascii_whitespace().collect();
+
+    with_current_runtime(|inner| {
+        if let Some(node) = inner.doc.node_mut(node_id) {
+            if let Some(el) = node.as_element_mut() {
+                let mut classes: Vec<String> = el.classes().iter().map(|&s| s.to_string()).collect();
+                let mut changed = false;
+                for item in to_add {
+                    if !classes.iter().any(|c| c == item) {
+                        classes.push(item.to_string());
+                        changed = true;
+                    }
+                }
+                if changed {
+                    el.set_attribute("class", classes.join(" "));
+                    inner.dirty = true;
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
+}
+
+fn internal_class_list_remove(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_idx = args.get_or_undefined(0).to_u32(context)? as usize;
+    let node_id = NodeId(node_idx);
+    let tokens_str = args.get_or_undefined(1).to_string(context)?.to_std_string_escaped();
+    let to_remove: Vec<&str> = tokens_str.split_ascii_whitespace().collect();
+
+    with_current_runtime(|inner| {
+        if let Some(node) = inner.doc.node_mut(node_id) {
+            if let Some(el) = node.as_element_mut() {
+                let mut classes: Vec<String> = el.classes().iter().map(|&s| s.to_string()).collect();
+                let initial_len = classes.len();
+                classes.retain(|c| !to_remove.contains(&c.as_str()));
+                if classes.len() != initial_len {
+                    el.set_attribute("class", classes.join(" "));
+                    inner.dirty = true;
+                }
+            }
+        }
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
+}
+
+fn internal_class_list_toggle(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_idx = args.get_or_undefined(0).to_u32(context)? as usize;
+    let node_id = NodeId(node_idx);
+    let token = args.get_or_undefined(1).to_string(context)?.to_std_string_escaped();
+    let token_trimmed = token.trim().to_string();
+    let force_val = args.get_or_undefined(2);
+    let force_opt = if force_val.is_null_or_undefined() {
+        None
+    } else {
+        Some(force_val.to_boolean())
+    };
+
+    let result = with_current_runtime(|inner| {
+        if let Some(node) = inner.doc.node_mut(node_id) {
+            if let Some(el) = node.as_element_mut() {
+                let mut classes: Vec<String> = el.classes().iter().map(|&s| s.to_string()).collect();
+                let currently_has = classes.contains(&token_trimmed);
+                let should_have = force_opt.unwrap_or(!currently_has);
+
+                if should_have && !currently_has {
+                    classes.push(token_trimmed);
+                    el.set_attribute("class", classes.join(" "));
+                    inner.dirty = true;
+                } else if !should_have && currently_has {
+                    classes.retain(|c| c != &token_trimmed);
+                    el.set_attribute("class", classes.join(" "));
+                    inner.dirty = true;
+                }
+                return Ok(should_have);
+            }
+        }
+        Ok(false)
+    })?;
+    Ok(JsValue::new(result))
+}
+
+fn internal_class_list_contains(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_idx = args.get_or_undefined(0).to_u32(context)? as usize;
+    let node_id = NodeId(node_idx);
+    let token = args.get_or_undefined(1).to_string(context)?.to_std_string_escaped();
+    let token_trimmed = token.trim();
+    let has = with_current_runtime(|inner| {
+        Ok(inner
+            .doc
+            .node(node_id)
+            .and_then(|n| n.as_element())
+            .is_some_and(|el| el.has_class(token_trimmed)))
+    })?;
+    Ok(JsValue::new(has))
+}
+
+fn internal_class_list_item(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_idx = args.get_or_undefined(0).to_u32(context)? as usize;
+    let node_id = NodeId(node_idx);
+    let idx = args.get_or_undefined(1).to_u32(context).unwrap_or(0) as usize;
+    let val = with_current_runtime(|inner| {
+        let classes = inner
+            .doc
+            .node(node_id)
+            .and_then(|n| n.as_element())
+            .map(|el| el.classes())
+            .unwrap_or_default();
+        Ok(classes.get(idx).map(|&s| s.to_string()))
+    })?;
+    match val {
+        Some(s) => Ok(js_string!(s).into()),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn internal_class_list_to_string(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_idx = args.get_or_undefined(0).to_u32(context)? as usize;
+    let node_id = NodeId(node_idx);
+    let class_str = with_current_runtime(|inner| {
+        Ok(inner
+            .doc
+            .node(node_id)
+            .and_then(|n| n.as_element())
+            .and_then(|el| el.get_attribute("class"))
+            .unwrap_or("")
+            .to_string())
+    })?;
+    Ok(js_string!(class_str).into())
+}
+
+fn internal_class_list_length(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_idx = args.get_or_undefined(0).to_u32(context)? as usize;
+    let node_id = NodeId(node_idx);
+    let len = with_current_runtime(|inner| {
+        Ok(inner
+            .doc
+            .node(node_id)
+            .and_then(|n| n.as_element())
+            .map(|el| el.classes().len())
+            .unwrap_or(0))
+    })?;
+    Ok(JsValue::new(len as i32))
+}
+
 fn element_get_parent_node(
     this: &JsValue,
     _args: &[JsValue],
@@ -1569,6 +1934,11 @@ pub fn create_element_object(
         .function(NativeFunction::from_fn_ptr(element_closest), js_string!("closest"), 1)
         .function(NativeFunction::from_fn_ptr(element_get_elements_by_class_name), js_string!("getElementsByClassName"), 1)
         .function(NativeFunction::from_fn_ptr(element_get_elements_by_tag_name), js_string!("getElementsByTagName"), 1)
+        .function(NativeFunction::from_fn_ptr(element_remove), js_string!("remove"), 0)
+        .function(NativeFunction::from_fn_ptr(element_replace_child), js_string!("replaceChild"), 2)
+        .function(NativeFunction::from_fn_ptr(element_clone_node), js_string!("cloneNode"), 1)
+        .function(NativeFunction::from_fn_ptr(element_contains), js_string!("contains"), 1)
+        .function(NativeFunction::from_fn_ptr(element_insert_adjacent_html), js_string!("insertAdjacentHTML"), 2)
         .property(js_string!("clientWidth"), 800, Attribute::all())
         .property(js_string!("clientHeight"), 600, Attribute::all())
         .property(js_string!("offsetWidth"), 800, Attribute::all())
@@ -1583,6 +1953,17 @@ pub fn create_element_object(
 
     let obj = obj_init.build();
     obj.set(js_string!("__nodeId"), JsValue::new(node_id.0 as i64), false, context)?;
+    let create_classlist_fn = context
+        .global_object()
+        .get(js_string!("__createClassList"), context)?;
+    if let Some(create_fn) = create_classlist_fn.as_callable() {
+        let cl = create_fn.call(
+            &JsValue::undefined(),
+            &[JsValue::new(node_id.0 as i64)],
+            context,
+        )?;
+        obj.set(js_string!("classList"), cl, false, context)?;
+    }
 
     // Create the style Proxy via the global helper
     let create_style_fn = context
@@ -1771,6 +2152,41 @@ impl JsRuntime {
             1,
             NativeFunction::from_fn_ptr(document_get_elements_by_tag_name),
         );
+        let _ = context.register_global_callable(
+            js_string!("__class_list_add"),
+            2,
+            NativeFunction::from_fn_ptr(internal_class_list_add),
+        );
+        let _ = context.register_global_callable(
+            js_string!("__class_list_remove"),
+            2,
+            NativeFunction::from_fn_ptr(internal_class_list_remove),
+        );
+        let _ = context.register_global_callable(
+            js_string!("__class_list_toggle"),
+            3,
+            NativeFunction::from_fn_ptr(internal_class_list_toggle),
+        );
+        let _ = context.register_global_callable(
+            js_string!("__class_list_contains"),
+            2,
+            NativeFunction::from_fn_ptr(internal_class_list_contains),
+        );
+        let _ = context.register_global_callable(
+            js_string!("__class_list_item"),
+            2,
+            NativeFunction::from_fn_ptr(internal_class_list_item),
+        );
+        let _ = context.register_global_callable(
+            js_string!("__class_list_to_string"),
+            1,
+            NativeFunction::from_fn_ptr(internal_class_list_to_string),
+        );
+        let _ = context.register_global_callable(
+            js_string!("__class_list_length"),
+            1,
+            NativeFunction::from_fn_ptr(internal_class_list_length),
+        );
 
         // Bind named forms to document (e.g. document.f)
         let named_forms = with_current_runtime(|inner| {
@@ -1855,6 +2271,32 @@ impl JsRuntime {
                         return true;
                     }
                 });
+            };
+
+            globalThis.__createClassList = function(nodeId) {
+                return {
+                    add: function(...tokens) {
+                        __class_list_add(nodeId, tokens.join(" "));
+                    },
+                    remove: function(...tokens) {
+                        __class_list_remove(nodeId, tokens.join(" "));
+                    },
+                    toggle: function(token, force) {
+                        return __class_list_toggle(nodeId, token, force !== undefined ? !!force : null);
+                    },
+                    contains: function(token) {
+                        return __class_list_contains(nodeId, token);
+                    },
+                    item: function(idx) {
+                        return __class_list_item(nodeId, idx);
+                    },
+                    toString: function() {
+                        return __class_list_to_string(nodeId);
+                    },
+                    get length() {
+                        return __class_list_length(nodeId);
+                    }
+                };
             };
 
             window.innerWidth = 1200;
