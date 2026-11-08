@@ -1060,3 +1060,56 @@ fn test_timers_and_request_animation_frame() {
         Some("timeout_0|raf|interval_1|interval_2|string_eval".to_string())
     );
 }
+
+#[test]
+fn test_inner_html_and_outer_html() {
+    let doc = parse_html(r#"<html><body><div id="container"><div id="box"><p class="intro">Hello <span>world</span></p></div></div></body></html>"#);
+    let mut runtime = JsRuntime::new(doc);
+
+    // 1. Test innerHTML and outerHTML getters
+    let res = runtime
+        .eval(
+            r#"
+        var box = document.getElementById("box");
+        var initialInner = box.innerHTML;
+        var initialOuter = box.outerHTML;
+
+        // 2. Test innerHTML setter
+        box.innerHTML = '<h2>Title</h2><p>New content</p>';
+        var newInner = box.innerHTML;
+        var h2Text = box.querySelector("h2").textContent;
+        var childCount = box.children.length;
+
+        // 3. Test outerHTML setter
+        box.outerHTML = '<section id="new-box"><span class="tag">Replaced</span></section>';
+        var oldBoxIsNull = document.getElementById("box") === null;
+        var newBox = document.getElementById("new-box");
+        var newBoxTag = newBox ? newBox.tagName : "";
+        var newBoxInner = newBox ? newBox.innerHTML : "";
+
+        [
+            initialInner,
+            initialOuter,
+            newInner,
+            h2Text,
+            childCount,
+            oldBoxIsNull,
+            newBoxTag,
+            newBoxInner
+        ].join("~~~");
+    "#,
+        )
+        .expect("eval failed");
+
+    let val = res.as_string().map(|s| s.to_std_string_escaped()).unwrap();
+    let parts: Vec<&str> = val.split("~~~").collect();
+    assert_eq!(parts[0], r#"<p class="intro">Hello <span>world</span></p>"#);
+    assert_eq!(parts[1], r#"<div id="box"><p class="intro">Hello <span>world</span></p></div>"#);
+    assert_eq!(parts[2], "<h2>Title</h2><p>New content</p>");
+    assert_eq!(parts[3], "Title");
+    assert_eq!(parts[4], "2");
+    assert_eq!(parts[5], "true");
+    assert_eq!(parts[6], "SECTION");
+    assert_eq!(parts[7], r#"<span class="tag">Replaced</span>"#);
+    assert!(runtime.is_dirty(), "Runtime must be marked dirty after DOM mutation via innerHTML/outerHTML");
+}

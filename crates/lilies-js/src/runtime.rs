@@ -752,6 +752,180 @@ fn element_set_text_content(
     Ok(JsValue::undefined())
 }
 
+fn serialize_node_to_html(doc: &Document, node_id: NodeId, out: &mut String) {
+    if let Some(node) = doc.node(node_id) {
+        match &node.node_type {
+            lilies_dom::NodeType::Element(el) => {
+                let tag = el.tag_name().to_ascii_lowercase();
+                out.push('<');
+                out.push_str(&tag);
+                for (name, val) in &el.attributes {
+                    out.push(' ');
+                    out.push_str(name);
+                    out.push_str("=\"");
+                    for c in val.chars() {
+                        match c {
+                            '&' => out.push_str("&amp;"),
+                            '"' => out.push_str("&quot;"),
+                            '<' => out.push_str("&lt;"),
+                            '>' => out.push_str("&gt;"),
+                            _ => out.push(c),
+                        }
+                    }
+                    out.push('"');
+                }
+                out.push('>');
+
+                if !lilies_html::is_void_element(&tag) {
+                    for child in doc.get_children(node_id) {
+                        serialize_node_to_html(doc, child, out);
+                    }
+                    out.push_str("</");
+                    out.push_str(&tag);
+                    out.push('>');
+                }
+            }
+            lilies_dom::NodeType::Text(t) => {
+                let parent_is_raw = node
+                    .parent
+                    .and_then(|pid| doc.node(pid))
+                    .and_then(|pn| pn.as_element())
+                    .is_some_and(|pel| {
+                        let pt = pel.tag_name();
+                        pt.eq_ignore_ascii_case("script") || pt.eq_ignore_ascii_case("style")
+                    });
+                if parent_is_raw {
+                    out.push_str(&t.data);
+                } else {
+                    for c in t.data.chars() {
+                        match c {
+                            '&' => out.push_str("&amp;"),
+                            '<' => out.push_str("&lt;"),
+                            '>' => out.push_str("&gt;"),
+                            _ => out.push(c),
+                        }
+                    }
+                }
+            }
+            lilies_dom::NodeType::Comment(c) => {
+                out.push_str("<!--");
+                out.push_str(c);
+                out.push_str("-->");
+            }
+            lilies_dom::NodeType::DocumentFragment | lilies_dom::NodeType::Document => {
+                for child in doc.get_children(node_id) {
+                    serialize_node_to_html(doc, child, out);
+                }
+            }
+            lilies_dom::NodeType::DocumentType(dt) => {
+                out.push_str("<!DOCTYPE ");
+                out.push_str(&dt.name);
+                out.push('>');
+            }
+        }
+    }
+}
+
+fn element_get_inner_html(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let html = with_current_runtime(|inner| {
+        let mut out = String::new();
+        for child in inner.doc.get_children(node_id) {
+            serialize_node_to_html(&inner.doc, child, &mut out);
+        }
+        Ok(out)
+    })?;
+    Ok(JsValue::new(js_string!(html)))
+}
+
+fn element_set_inner_html(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let html_str = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped();
+
+    let parsed_doc = lilies_html::parse_html(&html_str);
+    let fragment_children = parsed_doc.get_children(parsed_doc.root());
+
+    with_current_runtime(|inner| {
+        let existing = inner.doc.get_children(node_id);
+        for child in existing {
+            let _ = inner.doc.remove_child(node_id, child);
+        }
+
+        for child in fragment_children {
+            if let Some(imported) = import_node_into_doc(&parsed_doc, child, &mut inner.doc) {
+                let _ = inner.doc.append_child(node_id, imported);
+            }
+        }
+
+        inner.dirty = true;
+        Ok(())
+    })?;
+
+    Ok(JsValue::undefined())
+}
+
+fn element_get_outer_html(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let html = with_current_runtime(|inner| {
+        let mut out = String::new();
+        serialize_node_to_html(&inner.doc, node_id, &mut out);
+        Ok(out)
+    })?;
+    Ok(JsValue::new(js_string!(html)))
+}
+
+fn element_set_outer_html(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let html_str = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped();
+
+    let parsed_doc = lilies_html::parse_html(&html_str);
+    let fragment_children = parsed_doc.get_children(parsed_doc.root());
+
+    with_current_runtime(|inner| {
+        let parent = inner
+            .doc
+            .node(node_id)
+            .and_then(|n| n.parent)
+            .ok_or_else(|| {
+                JsNativeError::typ().with_message("Cannot set outerHTML on element with no parent")
+            })?;
+
+        for child in fragment_children {
+            if let Some(imported) = import_node_into_doc(&parsed_doc, child, &mut inner.doc) {
+                let _ = inner.doc.insert_before(parent, imported, node_id);
+            }
+        }
+
+        let _ = inner.doc.remove_child(parent, node_id);
+        inner.dirty = true;
+        Ok(())
+    })?;
+
+    Ok(JsValue::undefined())
+}
+
 fn element_set_attribute(
     this: &JsValue,
     args: &[JsValue],
@@ -2597,6 +2771,16 @@ pub fn create_element_object(
     let set_text = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_set_text_content))
         .name(js_string!("set textContent")).length(1).build();
 
+    let get_inner_html = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_inner_html))
+        .name(js_string!("get innerHTML")).build();
+    let set_inner_html = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_set_inner_html))
+        .name(js_string!("set innerHTML")).length(1).build();
+
+    let get_outer_html = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_outer_html))
+        .name(js_string!("get outerHTML")).build();
+    let set_outer_html = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_set_outer_html))
+        .name(js_string!("set outerHTML")).length(1).build();
+
     let get_parent = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_parent_node))
         .name(js_string!("get parentNode")).build();
     let get_children = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_children))
@@ -2651,6 +2835,8 @@ pub fn create_element_object(
     let mut obj_init = ObjectInitializer::with_native_data(ElementNode(node_id), context);
     obj_init
         .accessor(js_string!("textContent"), Some(get_text), Some(set_text), Attribute::all())
+        .accessor(js_string!("innerHTML"), Some(get_inner_html), Some(set_inner_html), Attribute::all())
+        .accessor(js_string!("outerHTML"), Some(get_outer_html), Some(set_outer_html), Attribute::all())
         .accessor(js_string!("src"), Some(get_src), Some(set_src), Attribute::all())
         .accessor(js_string!("href"), Some(get_href), Some(set_href), Attribute::all())
         .accessor(js_string!("parentNode"), Some(get_parent.clone()), None, Attribute::all())
