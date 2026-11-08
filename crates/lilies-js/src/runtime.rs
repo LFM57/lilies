@@ -1988,6 +1988,51 @@ pub fn create_element_object(
     })?;
 
     if is_form {
+        let submit_fn = FunctionObjectBuilder::new(
+            context.realm(),
+            NativeFunction::from_fn_ptr(|_this, _args, _context| {
+                Ok(JsValue::undefined())
+            }),
+        )
+        .name(js_string!("submit"))
+        .build();
+
+        let reset_fn = FunctionObjectBuilder::new(
+            context.realm(),
+            NativeFunction::from_fn_ptr(|this, _args, _context| {
+                let form_id = get_node_id_from_this(this)?;
+                with_current_runtime(|inner| {
+                    let mut stack = vec![form_id];
+                    while let Some(curr) = stack.pop() {
+                        if curr != form_id {
+                            if let Some(node) = inner.doc.node_mut(curr) {
+                                if let Some(el) = node.as_element_mut() {
+                                    if el.tag_name().eq_ignore_ascii_case("input") {
+                                        let default_val = el
+                                            .get_attribute("value")
+                                            .map(String::from)
+                                            .unwrap_or_default();
+                                        el.set_attribute("value", default_val);
+                                        inner.dirty = true;
+                                    }
+                                }
+                            }
+                        }
+                        for &c in inner.doc.get_children(curr).iter().rev() {
+                            stack.push(c);
+                        }
+                    }
+                    Ok(())
+                })?;
+                Ok(JsValue::undefined())
+            }),
+        )
+        .name(js_string!("reset"))
+        .build();
+
+        obj.set(js_string!("submit"), submit_fn, false, context)?;
+        obj.set(js_string!("reset"), reset_fn, false, context)?;
+
         let named_children = with_current_runtime(|inner| {
             let mut list = Vec::new();
             let mut stack = vec![node_id];
@@ -2008,10 +2053,16 @@ pub fn create_element_object(
             Ok(list)
         })?;
 
+        let form_elements = JsArray::new(context);
         for (cid, name) in named_children {
             let child_obj = get_or_create_element_object(cid, context)?;
-            obj.set(js_string!(name), child_obj, false, context)?;
+            form_elements.push(JsValue::new(child_obj.clone()), context)?;
+            let _ = form_elements.set(js_string!(name.clone()), child_obj.clone(), false, context);
+            if name != "submit" && name != "reset" {
+                obj.set(js_string!(name), child_obj, false, context)?;
+            }
         }
+        obj.set(js_string!("elements"), form_elements, false, context)?;
     }
 
     Ok(obj)

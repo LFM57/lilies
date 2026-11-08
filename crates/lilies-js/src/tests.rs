@@ -738,3 +738,51 @@ fn test_element_manipulation_traversal_and_class_list() {
         Some("true|false|false|true|true|true|false|true|true|true".to_string())
     );
 }
+
+#[test]
+fn test_form_submit_and_named_input_collision() {
+    let html = r#"<html><body>
+        <form id="loginForm">
+            <input name="submit" value="Sign In" />
+            <input name="reset" value="Clear" />
+            <input name="username" value="alice" />
+        </form>
+    </body></html>"#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        var form = document.getElementById("loginForm");
+        var isSubmitFn = typeof form.submit === 'function';
+        var isResetFn = typeof form.reset === 'function';
+        var submitInput = form.elements.submit;
+        var usernameInput = form.username;
+
+        // Ensure calling form.submit() does not throw TypeError
+        var submitThrew = false;
+        try {
+            form.submit();
+        } catch (e) {
+            submitThrew = true;
+        }
+
+        [
+            isSubmitFn,
+            isResetFn,
+            submitInput !== undefined,
+            submitInput.value,
+            usernameInput !== undefined,
+            usernameInput.value,
+            submitThrew
+        ].join("|");
+    "#,
+        )
+        .expect("eval failed");
+
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("true|true|true|Sign In|true|alice|false".to_string())
+    );
+}
