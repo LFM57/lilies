@@ -160,3 +160,36 @@ fn test_element_attributes_and_classes() {
     assert!(!el.has_class("disabled"));
     assert_eq!(el.classes(), vec!["btn", "btn-primary", "active"]);
 }
+
+#[test]
+fn test_fragment_replace_child_and_clone_node() {
+    let mut doc = Document::new();
+    let root = doc.root();
+
+    let div = doc.create_element("div", IndexMap::new());
+    doc.append_child(root, div).unwrap();
+
+    let p1 = doc.create_element("p", IndexMap::new());
+    let p2 = doc.create_element("p", IndexMap::new());
+    doc.append_child(div, p1).unwrap();
+    doc.append_child(div, p2).unwrap();
+
+    // Replace child
+    let span = doc.create_element("span", IndexMap::new());
+    doc.replace_child(div, span, p1).unwrap();
+    assert_eq!(doc.get_children(div), vec![span, p2]);
+
+    // Document fragment unpacking
+    let frag = doc.create_document_fragment();
+    let li1 = doc.create_element("li", IndexMap::new());
+    let li2 = doc.create_element("li", IndexMap::new());
+    doc.append_child(frag, li1).unwrap();
+    doc.append_child(frag, li2).unwrap();
+
+    doc.append_child(div, frag).unwrap();
+    assert_eq!(doc.get_children(div), vec![span, p2, li1, li2]);
+
+    // Deep clone
+    let cloned_div = doc.clone_node(div, true).unwrap();
+    assert_eq!(doc.get_children(cloned_div).len(), 4);
+}

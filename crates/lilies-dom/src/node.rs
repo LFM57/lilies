@@ -109,6 +109,7 @@ pub enum NodeType {
     Element(Element),
     Text(Text),
     Comment(String),
+    DocumentFragment,
 }
 
 /// A node within the DOM tree.
@@ -142,6 +143,10 @@ impl Node {
 
     pub fn is_element(&self) -> bool {
         matches!(self.node_type, NodeType::Element(_))
+    }
+
+    pub fn is_document_fragment(&self) -> bool {
+        matches!(self.node_type, NodeType::DocumentFragment)
     }
 
     pub fn as_element(&self) -> Option<&Element> {

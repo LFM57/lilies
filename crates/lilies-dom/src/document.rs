@@ -90,9 +90,16 @@ impl Document {
             .alloc(|id| Node::new(id, NodeType::DocumentType(doctype)))
     }
 
+    /// Creates a DocumentFragment node and returns its `NodeId`.
+    pub fn create_document_fragment(&mut self) -> NodeId {
+        self.arena
+            .alloc(|id| Node::new(id, NodeType::DocumentFragment))
+    }
+
     /// Appends `child` as the last child of `parent`.
     ///
     /// If `child` already has a parent, it is cleanly detached first.
+    /// If `child` is a `DocumentFragment`, all of its children are appended in order.
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) -> Result<(), DomError> {
         if !self.arena.contains(parent) {
             return Err(DomError::NodeNotFound(parent));
@@ -102,6 +109,18 @@ impl Document {
         }
         if parent == child || self.is_descendant_of(parent, child) {
             return Err(DomError::HierarchyRequestError);
+        }
+
+        if self
+            .arena
+            .get(child)
+            .map_or(false, |n| n.is_document_fragment())
+        {
+            let frag_children = self.get_children(child);
+            for fc in frag_children {
+                self.append_child(parent, fc)?;
+            }
+            return Ok(());
         }
 
         // If the child already has a parent, detach it
@@ -164,6 +183,18 @@ impl Document {
             return Ok(());
         }
 
+        if self
+            .arena
+            .get(child)
+            .map_or(false, |n| n.is_document_fragment())
+        {
+            let frag_children = self.get_children(child);
+            for fc in frag_children {
+                self.insert_before(parent, fc, reference_child)?;
+            }
+            return Ok(());
+        }
+
         // Detach child from existing parent if present
         if self.arena.get(child).and_then(|n| n.parent).is_some() {
             self.detach_from_parent(child)?;
@@ -208,6 +239,70 @@ impl Document {
         }
 
         self.detach_from_parent(child)
+    }
+
+    /// Replaces `old_child` with `new_child` as a child of `parent`.
+    pub fn replace_child(
+        &mut self,
+        parent: NodeId,
+        new_child: NodeId,
+        old_child: NodeId,
+    ) -> Result<(), DomError> {
+        if !self.arena.contains(parent) {
+            return Err(DomError::NodeNotFound(parent));
+        }
+        if !self.arena.contains(new_child) {
+            return Err(DomError::NodeNotFound(new_child));
+        }
+        if !self.arena.contains(old_child) {
+            return Err(DomError::NodeNotFound(old_child));
+        }
+        if self.arena.get(old_child).and_then(|n| n.parent) != Some(parent) {
+            return Err(DomError::NotAChild {
+                parent,
+                child: old_child,
+            });
+        }
+        if new_child == old_child {
+            return Ok(());
+        }
+
+        self.insert_before(parent, new_child, old_child)?;
+        self.remove_child(parent, old_child)?;
+        Ok(())
+    }
+
+    /// Clones a node. If `deep` is true, recursively clones all descendants.
+    pub fn clone_node(&mut self, node_id: NodeId, deep: bool) -> Option<NodeId> {
+        let node_type = {
+            let node = self.arena.get(node_id)?;
+            node.node_type.clone()
+        };
+
+        let new_id = match node_type {
+            NodeType::Document => {
+                let doc = Document::new();
+                doc.root()
+            }
+            NodeType::DocumentFragment => self.create_document_fragment(),
+            NodeType::DocumentType(dt) => {
+                self.create_doctype(&dt.name, dt.public_id, dt.system_id)
+            }
+            NodeType::Element(el) => self.create_element(&el.tag_name, el.attributes.clone()),
+            NodeType::Text(t) => self.create_text(&t.data),
+            NodeType::Comment(c) => self.create_comment(&c),
+        };
+
+        if deep {
+            let children = self.get_children(node_id);
+            for child in children {
+                if let Some(cloned_child) = self.clone_node(child, true) {
+                    let _ = self.append_child(new_id, cloned_child);
+                }
+            }
+        }
+
+        Some(new_id)
     }
 
     /// Internal helper to detach a node from its parent and siblings.
@@ -368,6 +463,9 @@ impl Document {
             }
             NodeType::Comment(comment) => {
                 out.push_str(&format!("{indent}<!--{comment}-->\n"));
+            }
+            NodeType::DocumentFragment => {
+                out.push_str(&format!("{indent}#document-fragment\n"));
             }
         }
 

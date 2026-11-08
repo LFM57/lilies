@@ -206,7 +206,7 @@ pub fn build_layout_tree_with_images(
             return Some(text_box);
         }
 
-        NodeType::Comment(_) | NodeType::DocumentType(_) => {
+        NodeType::Comment(_) | NodeType::DocumentType(_) | NodeType::DocumentFragment => {
             return None;
         }
     };
