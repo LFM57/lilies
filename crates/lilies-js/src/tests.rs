@@ -1113,3 +1113,130 @@ fn test_inner_html_and_outer_html() {
     assert_eq!(parts[7], r#"<span class="tag">Replaced</span>"#);
     assert!(runtime.is_dirty(), "Runtime must be marked dirty after DOM mutation via innerHTML/outerHTML");
 }
+
+#[test]
+fn test_child_nodes_text_nodes_and_node_types() {
+    let doc = parse_html(r#"<html><body><div id="target">First<!--comment--><b>Bold</b>Last</div></body></html>"#);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        var target = document.getElementById("target");
+        var childNodes = target.childNodes;
+        var children = target.children;
+
+        var cnLength = childNodes.length; // 4: "First", comment, <b>, "Last"
+        var chLength = children.length;   // 1: <b>
+
+        var node0 = childNodes[0];
+        var node0Type = node0.nodeType;
+        var node0Name = node0.nodeName;
+        var node0Val = node0.nodeValue;
+
+        var node1 = childNodes[1];
+        var node1Type = node1.nodeType;
+        var node1Name = node1.nodeName;
+        var node1Val = node1.nodeValue;
+
+        var node2 = childNodes[2];
+        var node2Type = node2.nodeType;
+        var node2Name = node2.nodeName;
+        var node2Val = node2.nodeValue === null ? "null" : node2.nodeValue;
+
+        var node3 = childNodes[3];
+        var node3Type = node3.nodeType;
+        var node3Name = node3.nodeName;
+        var node3Val = node3.nodeValue;
+
+        // Mutate text node value
+        node0.nodeValue = "UpdatedFirst";
+        var updated0Val = node0.nodeValue;
+
+        // Traversal checks
+        var fc = target.firstChild;
+        var lc = target.lastChild;
+        var fec = target.firstElementChild;
+        var lec = target.lastElementChild;
+
+        var nextSib = node0.nextSibling;
+        var prevSib = node3.previousSibling;
+        var nextElSib = node0.nextElementSibling;
+        var prevElSib = node3.previousElementSibling;
+
+        // Document node properties and Node constants
+        var docType = document.nodeType;
+        var docName = document.nodeName;
+        var nodeElemConst = window.Node.ELEMENT_NODE;
+        var nodeTextConst = Node.TEXT_NODE;
+        var nodeCommentConst = Node.COMMENT_NODE;
+        var nodeDocConst = Node.DOCUMENT_NODE;
+
+        [
+            cnLength,
+            chLength,
+            node0Type,
+            node0Name,
+            node0Val,
+            node1Type,
+            node1Name,
+            node1Val,
+            node2Type,
+            node2Name,
+            node2Val,
+            node3Type,
+            node3Name,
+            node3Val,
+            updated0Val,
+            fc.nodeName,
+            lc.nodeName,
+            fec.tagName,
+            lec.tagName,
+            nextSib.nodeName,
+            prevSib.nodeName,
+            nextElSib.tagName,
+            prevElSib.tagName,
+            docType,
+            docName,
+            nodeElemConst,
+            nodeTextConst,
+            nodeCommentConst,
+            nodeDocConst
+        ].join("~~~");
+    "#,
+        )
+        .expect("eval failed");
+
+    let val = res.as_string().map(|s| s.to_std_string_escaped()).unwrap();
+    let p: Vec<&str> = val.split("~~~").collect();
+    assert_eq!(p[0], "4"); // childNodes.length
+    assert_eq!(p[1], "1"); // children.length
+    assert_eq!(p[2], "3"); // Text nodeType
+    assert_eq!(p[3], "#text");
+    assert_eq!(p[4], "First");
+    assert_eq!(p[5], "8"); // Comment nodeType
+    assert_eq!(p[6], "#comment");
+    assert_eq!(p[7], "comment");
+    assert_eq!(p[8], "1"); // Element nodeType
+    assert_eq!(p[9], "B");
+    assert_eq!(p[10], "null");
+    assert_eq!(p[11], "3"); // Text nodeType
+    assert_eq!(p[12], "#text");
+    assert_eq!(p[13], "Last");
+    assert_eq!(p[14], "UpdatedFirst");
+    assert_eq!(p[15], "#text"); // firstChild
+    assert_eq!(p[16], "#text"); // lastChild
+    assert_eq!(p[17], "B"); // firstElementChild
+    assert_eq!(p[18], "B"); // lastElementChild
+    assert_eq!(p[19], "#comment"); // node0.nextSibling
+    assert_eq!(p[20], "B"); // node3.previousSibling
+    assert_eq!(p[21], "B"); // node0.nextElementSibling
+    assert_eq!(p[22], "B"); // node3.previousElementSibling
+    assert_eq!(p[23], "9"); // document.nodeType
+    assert_eq!(p[24], "#document");
+    assert_eq!(p[25], "1"); // Node.ELEMENT_NODE
+    assert_eq!(p[26], "3"); // Node.TEXT_NODE
+    assert_eq!(p[27], "8"); // Node.COMMENT_NODE
+    assert_eq!(p[28], "9"); // Node.DOCUMENT_NODE
+    assert!(runtime.is_dirty(), "Runtime must be dirty after nodeValue mutation");
+}

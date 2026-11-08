@@ -375,6 +375,15 @@ fn document_create_document_fragment(
     Ok(JsValue::new(obj))
 }
 
+fn document_get_child_nodes(
+    _this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let child_ids = with_current_runtime(|inner| Ok(inner.doc.get_children(inner.doc.root())))?;
+    wrap_elements_as_collection(child_ids, context)
+}
+
 fn wrap_elements_as_collection(node_ids: Vec<NodeId>, context: &mut Context) -> JsResult<JsValue> {
     let array = JsArray::new(context);
     for node_id in node_ids {
@@ -1860,12 +1869,17 @@ fn element_get_children(
         Ok(list)
     })?;
 
-    let array = JsArray::new(context);
-    for cid in child_ids {
-        let obj = get_or_create_element_object(cid, context)?;
-        array.push(JsValue::new(obj), context)?;
-    }
-    Ok(JsValue::new(array))
+    wrap_elements_as_collection(child_ids, context)
+}
+
+fn element_get_child_nodes(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let child_ids = with_current_runtime(|inner| Ok(inner.doc.get_children(node_id)))?;
+    wrap_elements_as_collection(child_ids, context)
 }
 
 fn element_get_first_child(
@@ -1900,6 +1914,205 @@ fn element_get_last_child(
     }
 }
 
+fn element_get_first_element_child(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let child_id = with_current_runtime(|inner| {
+        for &cid in inner.doc.get_children(node_id).iter() {
+            if inner.doc.node(cid).is_some_and(|n| n.is_element()) {
+                return Ok(Some(cid));
+            }
+        }
+        Ok(None)
+    })?;
+    match child_id {
+        Some(cid) => Ok(JsValue::new(get_or_create_element_object(cid, context)?)),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn element_get_last_element_child(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let child_id = with_current_runtime(|inner| {
+        for &cid in inner.doc.get_children(node_id).iter().rev() {
+            if inner.doc.node(cid).is_some_and(|n| n.is_element()) {
+                return Ok(Some(cid));
+            }
+        }
+        Ok(None)
+    })?;
+    match child_id {
+        Some(cid) => Ok(JsValue::new(get_or_create_element_object(cid, context)?)),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn element_get_next_sibling(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let next_id = with_current_runtime(|inner| Ok(inner.doc.next_sibling(node_id)))?;
+    match next_id {
+        Some(nid) => Ok(JsValue::new(get_or_create_element_object(nid, context)?)),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn element_get_previous_sibling(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let prev_id = with_current_runtime(|inner| Ok(inner.doc.prev_sibling(node_id)))?;
+    match prev_id {
+        Some(pid) => Ok(JsValue::new(get_or_create_element_object(pid, context)?)),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn element_get_next_element_sibling(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let next_el = with_current_runtime(|inner| {
+        let mut curr = inner.doc.next_sibling(node_id);
+        while let Some(cid) = curr {
+            if inner.doc.node(cid).is_some_and(|n| n.is_element()) {
+                return Ok(Some(cid));
+            }
+            curr = inner.doc.next_sibling(cid);
+        }
+        Ok(None)
+    })?;
+    match next_el {
+        Some(nid) => Ok(JsValue::new(get_or_create_element_object(nid, context)?)),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn element_get_previous_element_sibling(
+    this: &JsValue,
+    _args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let prev_el = with_current_runtime(|inner| {
+        let mut curr = inner.doc.prev_sibling(node_id);
+        while let Some(cid) = curr {
+            if inner.doc.node(cid).is_some_and(|n| n.is_element()) {
+                return Ok(Some(cid));
+            }
+            curr = inner.doc.prev_sibling(cid);
+        }
+        Ok(None)
+    })?;
+    match prev_el {
+        Some(pid) => Ok(JsValue::new(get_or_create_element_object(pid, context)?)),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn element_get_node_type(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let node_type = with_current_runtime(|inner| {
+        let val = inner.doc.node(node_id).map(|n| match &n.node_type {
+            lilies_dom::NodeType::Element(_) => 1,
+            lilies_dom::NodeType::Text(_) => 3,
+            lilies_dom::NodeType::Comment(_) => 8,
+            lilies_dom::NodeType::Document => 9,
+            lilies_dom::NodeType::DocumentType(_) => 10,
+            lilies_dom::NodeType::DocumentFragment => 11,
+        }).unwrap_or(1);
+        Ok(val)
+    })?;
+    Ok(JsValue::new(node_type))
+}
+
+fn element_get_node_name(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let name = with_current_runtime(|inner| {
+        let n_name = inner.doc.node(node_id).map(|n| match &n.node_type {
+            lilies_dom::NodeType::Element(el) => el.tag_name().to_ascii_uppercase(),
+            lilies_dom::NodeType::Text(_) => "#text".to_string(),
+            lilies_dom::NodeType::Comment(_) => "#comment".to_string(),
+            lilies_dom::NodeType::Document => "#document".to_string(),
+            lilies_dom::NodeType::DocumentType(dt) => dt.name.clone(),
+            lilies_dom::NodeType::DocumentFragment => "#document-fragment".to_string(),
+        }).unwrap_or_default();
+        Ok(n_name)
+    })?;
+    Ok(JsValue::new(js_string!(name)))
+}
+
+fn element_get_node_value(
+    this: &JsValue,
+    _args: &[JsValue],
+    _context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let val = with_current_runtime(|inner| {
+        let v = inner.doc.node(node_id).and_then(|n| match &n.node_type {
+            lilies_dom::NodeType::Text(t) => Some(t.data.clone()),
+            lilies_dom::NodeType::Comment(c) => Some(c.clone()),
+            _ => None,
+        });
+        Ok(v)
+    })?;
+    match val {
+        Some(s) => Ok(JsValue::new(js_string!(s))),
+        None => Ok(JsValue::null()),
+    }
+}
+
+fn element_set_node_value(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let val_str = args
+        .get_or_undefined(0)
+        .to_string(context)?
+        .to_std_string_escaped();
+    with_current_runtime(|inner| {
+        if let Some(node) = inner.doc.node_mut(node_id) {
+            match &mut node.node_type {
+                lilies_dom::NodeType::Text(t) => {
+                    t.data = val_str;
+                    inner.dirty = true;
+                }
+                lilies_dom::NodeType::Comment(c) => {
+                    *c = val_str;
+                    inner.dirty = true;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    })?;
+    Ok(JsValue::undefined())
+}
+
 fn element_get_tag_name(
     this: &JsValue,
     _args: &[JsValue],
@@ -1911,10 +2124,12 @@ fn element_get_tag_name(
             .doc
             .node(node_id)
             .and_then(|n| n.as_element())
-            .map(|e| e.tag_name().to_ascii_uppercase())
-            .unwrap_or_default())
+            .map(|e| e.tag_name().to_ascii_uppercase()))
     })?;
-    Ok(JsValue::new(js_string!(tag)))
+    match tag {
+        Some(t) => Ok(JsValue::new(js_string!(t))),
+        None => Ok(JsValue::undefined()),
+    }
 }
 
 fn element_get_id(
@@ -2785,10 +3000,33 @@ pub fn create_element_object(
         .name(js_string!("get parentNode")).build();
     let get_children = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_children))
         .name(js_string!("get children")).build();
+    let get_child_nodes = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_child_nodes))
+        .name(js_string!("get childNodes")).build();
     let get_first_child = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_first_child))
         .name(js_string!("get firstChild")).build();
     let get_last_child = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_last_child))
         .name(js_string!("get lastChild")).build();
+    let get_first_element_child = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_first_element_child))
+        .name(js_string!("get firstElementChild")).build();
+    let get_last_element_child = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_last_element_child))
+        .name(js_string!("get lastElementChild")).build();
+    let get_next_sibling = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_next_sibling))
+        .name(js_string!("get nextSibling")).build();
+    let get_prev_sibling = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_previous_sibling))
+        .name(js_string!("get previousSibling")).build();
+    let get_next_element_sibling = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_next_element_sibling))
+        .name(js_string!("get nextElementSibling")).build();
+    let get_prev_element_sibling = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_previous_element_sibling))
+        .name(js_string!("get previousElementSibling")).build();
+
+    let get_node_type = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_node_type))
+        .name(js_string!("get nodeType")).build();
+    let get_node_name = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_node_name))
+        .name(js_string!("get nodeName")).build();
+    let get_node_value = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_node_value))
+        .name(js_string!("get nodeValue")).build();
+    let set_node_value = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_set_node_value))
+        .name(js_string!("set nodeValue")).length(1).build();
 
     let get_tag_name = FunctionObjectBuilder::new(context.realm(), NativeFunction::from_fn_ptr(element_get_tag_name))
         .name(js_string!("get tagName")).build();
@@ -2841,12 +3079,20 @@ pub fn create_element_object(
         .accessor(js_string!("href"), Some(get_href), Some(set_href), Attribute::all())
         .accessor(js_string!("parentNode"), Some(get_parent.clone()), None, Attribute::all())
         .accessor(js_string!("parentElement"), Some(get_parent), None, Attribute::all())
-        .accessor(js_string!("children"), Some(get_children.clone()), None, Attribute::all())
-        .accessor(js_string!("childNodes"), Some(get_children), None, Attribute::all())
+        .accessor(js_string!("children"), Some(get_children), None, Attribute::all())
+        .accessor(js_string!("childNodes"), Some(get_child_nodes), None, Attribute::all())
         .accessor(js_string!("firstChild"), Some(get_first_child), None, Attribute::all())
         .accessor(js_string!("lastChild"), Some(get_last_child), None, Attribute::all())
-        .accessor(js_string!("tagName"), Some(get_tag_name.clone()), None, Attribute::all())
-        .accessor(js_string!("nodeName"), Some(get_tag_name), None, Attribute::all())
+        .accessor(js_string!("firstElementChild"), Some(get_first_element_child), None, Attribute::all())
+        .accessor(js_string!("lastElementChild"), Some(get_last_element_child), None, Attribute::all())
+        .accessor(js_string!("nextSibling"), Some(get_next_sibling), None, Attribute::all())
+        .accessor(js_string!("previousSibling"), Some(get_prev_sibling), None, Attribute::all())
+        .accessor(js_string!("nextElementSibling"), Some(get_next_element_sibling), None, Attribute::all())
+        .accessor(js_string!("previousElementSibling"), Some(get_prev_element_sibling), None, Attribute::all())
+        .accessor(js_string!("nodeType"), Some(get_node_type), None, Attribute::all())
+        .accessor(js_string!("nodeName"), Some(get_node_name), None, Attribute::all())
+        .accessor(js_string!("nodeValue"), Some(get_node_value), Some(set_node_value), Attribute::all())
+        .accessor(js_string!("tagName"), Some(get_tag_name), None, Attribute::all())
         .accessor(js_string!("id"), Some(get_id), Some(set_id), Attribute::all())
         .accessor(js_string!("className"), Some(get_class), Some(set_class), Attribute::all())
         .accessor(js_string!("value"), Some(get_val), Some(set_val), Attribute::all())
@@ -3218,6 +3464,11 @@ impl JsRuntime {
             NativeFunction::from_fn_ptr(document_create_document_fragment),
         );
         let _ = context.register_global_callable(
+            js_string!("__get_document_child_nodes"),
+            0,
+            NativeFunction::from_fn_ptr(document_get_child_nodes),
+        );
+        let _ = context.register_global_callable(
             js_string!("__get_elements_by_tag_name"),
             1,
             NativeFunction::from_fn_ptr(document_get_elements_by_tag_name),
@@ -3290,7 +3541,7 @@ impl JsRuntime {
         let _ = document.set(js_string!("images"), empty_images, false, &mut context);
 
         // 4. Register browser environment preamble & style proxy factory
-        let browser_preamble = r#"
+        let browser_preamble = r##"
             globalThis.__createStyleProxy = function(nodeId) {
                 return new Proxy({}, {
                     get(target, prop) {
@@ -3498,11 +3749,52 @@ impl JsRuntime {
                 return img;
             };
 
+            window.Node = {
+                ELEMENT_NODE: 1,
+                ATTRIBUTE_NODE: 2,
+                TEXT_NODE: 3,
+                CDATA_SECTION_NODE: 4,
+                ENTITY_REFERENCE_NODE: 5,
+                ENTITY_NODE: 6,
+                PROCESSING_INSTRUCTION_NODE: 7,
+                COMMENT_NODE: 8,
+                DOCUMENT_NODE: 9,
+                DOCUMENT_TYPE_NODE: 10,
+                DOCUMENT_FRAGMENT_NODE: 11,
+                NOTATION_NODE: 12
+            };
+            globalThis.Node = window.Node;
+
             document.defaultView = window;
             document.compatMode = "CSS1Compat";
             document.readyState = "complete";
             document.cookie = "";
             document.title = "";
+            document.nodeType = 9;
+            document.nodeName = "#document";
+            document.nodeValue = null;
+
+            Object.defineProperty(document, 'childNodes', {
+                get: function() { return __get_document_child_nodes(); },
+                configurable: true,
+                enumerable: true
+            });
+            Object.defineProperty(document, 'firstChild', {
+                get: function() {
+                    var cn = this.childNodes;
+                    return cn && cn.length > 0 ? cn[0] : null;
+                },
+                configurable: true,
+                enumerable: true
+            });
+            Object.defineProperty(document, 'lastChild', {
+                get: function() {
+                    var cn = this.childNodes;
+                    return cn && cn.length > 0 ? cn[cn.length - 1] : null;
+                },
+                configurable: true,
+                enumerable: true
+            });
 
             Object.defineProperty(document, 'documentElement', {
                 get: function() { return __get_document_element(); },
@@ -3570,7 +3862,7 @@ impl JsRuntime {
                     stopPropagation: function() { this._stopped = true; this.cancelBubble = true; }
                 };
             };
-        "#;
+        "##;
         let _ = context.eval(Source::from_bytes(browser_preamble.as_bytes()));
 
         Self { context, inner }
