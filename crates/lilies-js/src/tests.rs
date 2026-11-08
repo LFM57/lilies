@@ -604,3 +604,39 @@ fn test_style_proxy_methods_and_coercion() {
         Some("red|blue|red||string|[object CSSStyleDeclaration]|[object CSSStyleDeclaration]|boolean".to_string())
     );
 }
+
+#[test]
+fn test_get_computed_style_and_match_media() {
+    let html = r#"<html><head><style>#card { display: flex; color: green; font-size: 20px; }</style></head><body><div id="card">Content</div></body></html>"#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        var card = document.getElementById("card");
+        var computed = window.getComputedStyle(card);
+        var display = computed.display;
+        var color = computed.getPropertyValue("color");
+        var fontSize = computed.fontSize;
+
+        var mql = window.matchMedia("(prefers-color-scheme: dark)");
+        var isDark = mql.matches;
+        var listenerAdded = typeof mql.addEventListener === 'function';
+
+        [
+            display,
+            color,
+            fontSize,
+            isDark,
+            listenerAdded
+        ].join("|");
+    "#,
+        )
+        .expect("eval failed");
+
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("flex|rgb(0, 128, 0)|20px|false|true".to_string())
+    );
+}

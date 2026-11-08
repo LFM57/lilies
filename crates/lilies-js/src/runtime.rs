@@ -1355,6 +1355,85 @@ fn internal_get_style(
     }
 }
 
+fn internal_get_computed_style(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_idx = args.get_or_undefined(0).to_u32(context)? as usize;
+    let node_id = NodeId(node_idx);
+    let prop_raw = args.get_or_undefined(1).to_string(context)?.to_std_string_escaped();
+    let kebab_prop = camel_to_kebab(&prop_raw);
+
+    let val = with_current_runtime(|inner| {
+        let style_tree = lilies_css::compute_styles_for_document(&inner.doc);
+        let style = style_tree.get(node_id).cloned().unwrap_or_default();
+        let prop_val = match kebab_prop.as_str() {
+            "display" => match style.display {
+                lilies_css::Display::Block => "block",
+                lilies_css::Display::Inline => "inline",
+                lilies_css::Display::Flex => "flex",
+                lilies_css::Display::None => "none",
+            }
+            .to_string(),
+            "width" => match style.width {
+                lilies_css::LengthOrAuto::Px(v) => format!("{v}px"),
+                lilies_css::LengthOrAuto::Auto => "auto".to_string(),
+            },
+            "height" => match style.height {
+                lilies_css::LengthOrAuto::Px(v) => format!("{v}px"),
+                lilies_css::LengthOrAuto::Auto => "auto".to_string(),
+            },
+            "color" => format!(
+                "rgb({}, {}, {})",
+                style.color.r, style.color.g, style.color.b
+            ),
+            "background-color" => format!(
+                "rgba({}, {}, {}, {})",
+                style.background_color.r,
+                style.background_color.g,
+                style.background_color.b,
+                style.background_color.a as f32 / 255.0
+            ),
+            "font-size" => format!("{}px", style.font_size),
+            "margin-top" => match style.margin_top {
+                lilies_css::LengthOrAuto::Px(v) => format!("{v}px"),
+                _ => "0px".to_string(),
+            },
+            "margin-right" => match style.margin_right {
+                lilies_css::LengthOrAuto::Px(v) => format!("{v}px"),
+                _ => "0px".to_string(),
+            },
+            "margin-bottom" => match style.margin_bottom {
+                lilies_css::LengthOrAuto::Px(v) => format!("{v}px"),
+                _ => "0px".to_string(),
+            },
+            "margin-left" => match style.margin_left {
+                lilies_css::LengthOrAuto::Px(v) => format!("{v}px"),
+                _ => "0px".to_string(),
+            },
+            "padding-top" => format!("{}px", style.padding_top),
+            "padding-right" => format!("{}px", style.padding_right),
+            "padding-bottom" => format!("{}px", style.padding_bottom),
+            "padding-left" => format!("{}px", style.padding_left),
+            "border-top-width" | "border-top" => format!("{}px", style.border_top),
+            "border-right-width" | "border-right" => format!("{}px", style.border_right),
+            "border-bottom-width" | "border-bottom" => format!("{}px", style.border_bottom),
+            "border-left-width" | "border-left" => format!("{}px", style.border_left),
+            "text-align" => match style.text_align {
+                lilies_css::TextAlign::Left => "left",
+                lilies_css::TextAlign::Center => "center",
+                lilies_css::TextAlign::Right => "right",
+            }
+            .to_string(),
+            _ => "".to_string(),
+        };
+        Ok(prop_val)
+    })?;
+
+    Ok(js_string!(val).into())
+}
+
 /// Returns the cached JavaScript Element object for `node_id`, or creates and caches a new one.
 pub fn get_or_create_element_object(
     node_id: NodeId,
@@ -1476,6 +1555,7 @@ pub fn create_element_object(
         .property(js_string!("dataset"), dataset, Attribute::all());
 
     let obj = obj_init.build();
+    obj.set(js_string!("__nodeId"), JsValue::new(node_id.0 as i64), false, context)?;
 
     // Create the style Proxy via the global helper
     let create_style_fn = context
@@ -1620,6 +1700,11 @@ impl JsRuntime {
             NativeFunction::from_fn_ptr(internal_get_style),
         );
         let _ = context.register_global_callable(
+            js_string!("__get_computed_style_internal"),
+            2,
+            NativeFunction::from_fn_ptr(internal_get_computed_style),
+        );
+        let _ = context.register_global_callable(
             js_string!("__get_document_element"),
             0,
             NativeFunction::from_fn_ptr(document_get_document_element),
@@ -1745,6 +1830,70 @@ impl JsRuntime {
             window.pageYOffset = 0;
             window.scrollTo = function() {};
             window.scrollBy = function() {};
+
+            window.getComputedStyle = function(el) {
+                if (!el || typeof el.__nodeId !== 'number') return null;
+                var nodeId = el.__nodeId;
+                return new Proxy({}, {
+                    get(target, prop) {
+                        if (typeof prop === 'string') {
+                            if (prop === 'getPropertyValue') {
+                                return function(k) { return __get_computed_style_internal(nodeId, k); };
+                            }
+                            if (prop === 'item') {
+                                return function(i) { return ""; };
+                            }
+                            if (prop === 'toString') {
+                                return function() { return "[object CSSStyleDeclaration]"; };
+                            }
+                            if (prop in Object.prototype) {
+                                return Object.prototype[prop];
+                            }
+                            return __get_computed_style_internal(nodeId, prop);
+                        }
+                        if (typeof prop === 'symbol') {
+                            if (prop === Symbol.toStringTag) return "CSSStyleDeclaration";
+                            return target[prop];
+                        }
+                        return target[prop];
+                    }
+                });
+            };
+
+            window.matchMedia = function(mediaQuery) {
+                var mq = String(mediaQuery || "");
+                var matches = false;
+                if (mq.indexOf("prefers-color-scheme") !== -1 && mq.indexOf("dark") !== -1) {
+                    matches = false;
+                }
+                var minWidthMatch = mq.match(/min-width:\s*(\d+)px/);
+                if (minWidthMatch) {
+                    matches = window.innerWidth >= parseInt(minWidthMatch[1], 10);
+                }
+                var maxWidthMatch = mq.match(/max-width:\s*(\d+)px/);
+                if (maxWidthMatch) {
+                    matches = window.innerWidth <= parseInt(maxWidthMatch[1], 10);
+                }
+
+                var listeners = [];
+                return {
+                    media: mq,
+                    matches: matches,
+                    onchange: null,
+                    addListener: function(fn) { if (typeof fn === 'function') listeners.push(fn); },
+                    removeListener: function(fn) {
+                        var idx = listeners.indexOf(fn);
+                        if (idx !== -1) listeners.splice(idx, 1);
+                    },
+                    addEventListener: function(type, fn) {
+                        if (type === 'change') this.addListener(fn);
+                    },
+                    removeEventListener: function(type, fn) {
+                        if (type === 'change') this.removeListener(fn);
+                    },
+                    dispatchEvent: function(evt) { return true; }
+                };
+            };
 
             window.location = {
                 href: "",
