@@ -2585,8 +2585,10 @@ fn dispatch_event_with_context(
     context: &mut Context,
 ) -> JsResult<bool> {
     let lower_type = event_type.to_ascii_lowercase();
-    if target.is_some() && lower_type == "click" && event_val_override.is_none() {
-        return dispatch_click_with_context(target.unwrap(), context);
+    if let Some(target_node) = target {
+        if lower_type == "click" && event_val_override.is_none() {
+            return dispatch_click_with_context(target_node, context);
+        }
     }
 
     let doc_obj = context
@@ -4519,7 +4521,7 @@ impl JsRuntime {
         let _guard = ActiveRuntimeGuard::new(&self.inner);
         let frames: Vec<AnimationFrame> = {
             let mut inner = self.inner.borrow_mut();
-            inner.animation_frames.drain(..).collect()
+            std::mem::take(&mut inner.animation_frames)
         };
 
         let mut count = 0;
@@ -4531,7 +4533,7 @@ impl JsRuntime {
             let cancelled = self.inner.borrow().cancelled_rafs.contains(&frame.id);
             if !cancelled {
                 count += 1;
-                if let Err(e) = frame.callback.call(&this_val, &[ts_val.clone()], &mut self.context) {
+                if let Err(e) = frame.callback.call(&this_val, std::slice::from_ref(&ts_val), &mut self.context) {
                     eprintln!("requestAnimationFrame callback error: {e}");
                 }
             }
