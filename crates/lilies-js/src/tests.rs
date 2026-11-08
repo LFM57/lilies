@@ -564,3 +564,43 @@ fn test_dom_query_methods() {
         Some("true|First paragraph|2|Second paragraph|2|2|1|2|true|true".to_string())
     );
 }
+
+#[test]
+fn test_style_proxy_methods_and_coercion() {
+    let html = r#"<html><body><div id="box" style="color: red; font-size: 16px;">Hello</div></body></html>"#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r#"
+        var box = document.getElementById("box");
+        var initialColor = box.style.getPropertyValue("color");
+        box.style.setProperty("background-color", "blue");
+        var bg = box.style.getPropertyValue("background-color");
+        var removed = box.style.removeProperty("color");
+        var colorAfterRemove = box.style.getPropertyValue("color");
+        var itemVal = box.style.item(0);
+        var strVal = box.style.toString();
+        var coerced = String(box.style);
+        var hasProp = box.style.hasOwnProperty("color");
+
+        [
+            initialColor,
+            bg,
+            removed,
+            colorAfterRemove,
+            typeof itemVal,
+            strVal,
+            coerced,
+            typeof hasProp
+        ].join("|");
+    "#,
+        )
+        .expect("eval failed");
+
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("red|blue|red||string|[object CSSStyleDeclaration]|[object CSSStyleDeclaration]|boolean".to_string())
+    );
+}

@@ -1690,10 +1690,38 @@ impl JsRuntime {
                             if (prop === 'setProperty') {
                                 return function(k, v) { __set_style_internal(nodeId, k, v); };
                             }
+                            if (prop === 'removeProperty') {
+                                return function(k) {
+                                    var old = __get_style_internal(nodeId, k);
+                                    __set_style_internal(nodeId, k, "");
+                                    return old;
+                                };
+                            }
                             if (prop === 'getPropertyValue') {
                                 return function(k) { return __get_style_internal(nodeId, k); };
                             }
+                            if (prop === 'item') {
+                                return function(i) { return ""; };
+                            }
+                            if (prop === 'toString') {
+                                return function() { return "[object CSSStyleDeclaration]"; };
+                            }
+                            if (prop === 'valueOf') {
+                                return function() { return target; };
+                            }
+                            if (prop in Object.prototype) {
+                                return Object.prototype[prop];
+                            }
                             return __get_style_internal(nodeId, prop);
+                        }
+                        if (typeof prop === 'symbol') {
+                            if (prop === Symbol.toPrimitive) {
+                                return function(hint) { return "[object CSSStyleDeclaration]"; };
+                            }
+                            if (prop === Symbol.toStringTag) {
+                                return "CSSStyleDeclaration";
+                            }
+                            return target[prop];
                         }
                         return target[prop];
                     },
