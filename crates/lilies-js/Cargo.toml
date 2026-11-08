@@ -8,6 +8,7 @@ license.workspace = true
 boa_engine = "0.19"
 boa_gc = "0.19"
 lilies-dom = { path = "../lilies-dom" }
+lilies-css = { path = "../lilies-css" }
 thiserror.workspace = true
 
 [dev-dependencies]

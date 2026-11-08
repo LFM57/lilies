@@ -114,7 +114,7 @@ impl Document {
         if self
             .arena
             .get(child)
-            .map_or(false, |n| n.is_document_fragment())
+            .is_some_and(|n| n.is_document_fragment())
         {
             let frag_children = self.get_children(child);
             for fc in frag_children {
@@ -186,7 +186,7 @@ impl Document {
         if self
             .arena
             .get(child)
-            .map_or(false, |n| n.is_document_fragment())
+            .is_some_and(|n| n.is_document_fragment())
         {
             let frag_children = self.get_children(child);
             for fc in frag_children {

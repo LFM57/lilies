@@ -510,3 +510,57 @@ fn test_append_child_and_insert_before_cycle_preserves_parent() {
         Some("true,true,true,BODY".to_string())
     );
 }
+
+#[test]
+fn test_dom_query_methods() {
+    let html = r#"<html><body>
+        <div id="container" class="main-box active">
+            <p class="text highlight">First paragraph</p>
+            <p class="text">Second paragraph</p>
+            <form name="searchForm">
+                <input name="query" value="rust" />
+            </form>
+        </div>
+        <div id="footer">
+            <span class="highlight">Footer text</span>
+        </div>
+    </body></html>"#;
+    let doc = parse_html(html);
+    let mut runtime = JsRuntime::new(doc);
+
+    let res = runtime
+        .eval(
+            r##"
+        var container = document.querySelector("#container");
+        var firstP = container.querySelector("p.highlight");
+        var allP = container.querySelectorAll("p");
+        var allHighlight = document.querySelectorAll(".highlight");
+        var byClass = document.getElementsByClassName("highlight");
+        var byName = document.getElementsByName("query");
+        var containerP = container.getElementsByTagName("p");
+
+        var pItem = allP.item(1);
+        var matchesP = firstP.matches("p.highlight");
+        var closestContainer = firstP.closest("#container");
+
+        [
+            container !== null,
+            firstP.textContent,
+            allP.length,
+            pItem.textContent,
+            allHighlight.length,
+            byClass.length,
+            byName.length,
+            containerP.length,
+            matchesP,
+            closestContainer === container
+        ].join("|");
+    "##,
+        )
+        .expect("eval failed");
+
+    assert_eq!(
+        res.as_string().map(|s| s.to_std_string_escaped()),
+        Some("true|First paragraph|2|Second paragraph|2|2|1|2|true|true".to_string())
+    );
+}

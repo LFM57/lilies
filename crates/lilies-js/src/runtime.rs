@@ -10,6 +10,7 @@ use boa_engine::{
     Context, JsArgs, JsData, JsError, JsNativeError, JsResult, JsValue, NativeFunction, Source,
 };
 use boa_gc::{Finalize, Trace};
+use lilies_css::{matches as css_matches, parse_selectors};
 use lilies_dom::{Document, IndexMap, NodeId};
 use std::cell::{Ref, RefCell, RefMut};
 use std::collections::HashMap;
@@ -314,6 +315,328 @@ fn document_create_text_node(
     Ok(JsValue::new(obj))
 }
 
+fn wrap_elements_as_collection(node_ids: Vec<NodeId>, context: &mut Context) -> JsResult<JsValue> {
+    let array = JsArray::new(context);
+    for node_id in node_ids {
+        let obj = get_or_create_element_object(node_id, context)?;
+        array.push(JsValue::new(obj), context)?;
+    }
+
+    let item_fn = FunctionObjectBuilder::new(
+        context.realm(),
+        NativeFunction::from_fn_ptr(|this, args, context| {
+            let index = args.get_or_undefined(0).to_u32(context).unwrap_or(0);
+            if let Some(obj) = this.as_object() {
+                if let Ok(val) = obj.get(index, context) {
+                    if !val.is_undefined() {
+                        return Ok(val);
+                    }
+                }
+            }
+            Ok(JsValue::null())
+        }),
+    )
+    .name(js_string!("item"))
+    .length(1)
+    .build();
+
+    let array_obj: boa_engine::object::JsObject = array.into();
+    let _ = array_obj.set(js_string!("item"), item_fn, false, context);
+    Ok(JsValue::new(array_obj))
+}
+
+fn query_selector_internal(
+    root: NodeId,
+    include_root: bool,
+    selector_str: &str,
+    first_only: bool,
+) -> JsResult<Vec<NodeId>> {
+    let selectors = match parse_selectors(selector_str) {
+        Ok(s) => s,
+        Err(_) => return Ok(Vec::new()),
+    };
+
+    with_current_runtime(|inner| {
+        let mut results = Vec::new();
+        let mut stack = Vec::new();
+        if include_root {
+            stack.push(root);
+        } else {
+            for &child in inner.doc.get_children(root).iter().rev() {
+                stack.push(child);
+            }
+        }
+
+        while let Some(curr) = stack.pop() {
+            if let Some(node) = inner.doc.node(curr) {
+                if node.is_element() {
+                    let matches_any = selectors
+                        .iter()
+                        .any(|s| css_matches(s, curr, inner.doc.arena()));
+                    if matches_any {
+                        results.push(curr);
+                        if first_only {
+                            break;
+                        }
+                    }
+                }
+            }
+            for &child in inner.doc.get_children(curr).iter().rev() {
+                stack.push(child);
+            }
+        }
+
+        Ok(results)
+    })
+}
+
+fn document_query_selector(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let selector_str = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let root = with_current_runtime(|inner| Ok(inner.doc.root()))?;
+    let found = query_selector_internal(root, false, &selector_str, true)?;
+    if let Some(&first) = found.first() {
+        let obj = get_or_create_element_object(first, context)?;
+        Ok(JsValue::new(obj))
+    } else {
+        Ok(JsValue::null())
+    }
+}
+
+fn document_query_selector_all(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let selector_str = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let root = with_current_runtime(|inner| Ok(inner.doc.root()))?;
+    let found = query_selector_internal(root, false, &selector_str, false)?;
+    wrap_elements_as_collection(found, context)
+}
+
+fn element_query_selector(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let selector_str = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let found = query_selector_internal(node_id, false, &selector_str, true)?;
+    if let Some(&first) = found.first() {
+        let obj = get_or_create_element_object(first, context)?;
+        Ok(JsValue::new(obj))
+    } else {
+        Ok(JsValue::null())
+    }
+}
+
+fn element_query_selector_all(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let selector_str = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let found = query_selector_internal(node_id, false, &selector_str, false)?;
+    wrap_elements_as_collection(found, context)
+}
+
+fn element_matches(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let selector_str = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let selectors = match parse_selectors(&selector_str) {
+        Ok(s) => s,
+        Err(_) => return Ok(JsValue::new(false)),
+    };
+    let matches_any = with_current_runtime(|inner| {
+        Ok(selectors
+            .iter()
+            .any(|s| css_matches(s, node_id, inner.doc.arena())))
+    })?;
+    Ok(JsValue::new(matches_any))
+}
+
+fn element_closest(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let selector_str = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let selectors = match parse_selectors(&selector_str) {
+        Ok(s) => s,
+        Err(_) => return Ok(JsValue::null()),
+    };
+
+    let found_id = with_current_runtime(|inner| {
+        let mut curr = Some(node_id);
+        while let Some(id) = curr {
+            if let Some(node) = inner.doc.node(id) {
+                if node.is_element()
+                    && selectors
+                        .iter()
+                        .any(|s| css_matches(s, id, inner.doc.arena()))
+                {
+                    return Ok(Some(id));
+                }
+                curr = node.parent;
+            } else {
+                break;
+            }
+        }
+        Ok(None)
+    })?;
+
+    if let Some(matched_id) = found_id {
+        let obj = get_or_create_element_object(matched_id, context)?;
+        Ok(JsValue::new(obj))
+    } else {
+        Ok(JsValue::null())
+    }
+}
+
+fn document_get_elements_by_class_name(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let class_str = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let classes: Vec<String> = class_str
+        .split_ascii_whitespace()
+        .map(String::from)
+        .collect();
+    let root = with_current_runtime(|inner| Ok(inner.doc.root()))?;
+    let node_ids = with_current_runtime(|inner| {
+        let mut results = Vec::new();
+        if classes.is_empty() {
+            return Ok(results);
+        }
+        let mut stack = Vec::new();
+        for &c in inner.doc.get_children(root).iter().rev() {
+            stack.push(c);
+        }
+        while let Some(curr) = stack.pop() {
+            if let Some(node) = inner.doc.node(curr) {
+                if let Some(el) = node.as_element() {
+                    if classes.iter().all(|c| el.has_class(c)) {
+                        results.push(curr);
+                    }
+                }
+            }
+            for &c in inner.doc.get_children(curr).iter().rev() {
+                stack.push(c);
+            }
+        }
+        Ok(results)
+    })?;
+    wrap_elements_as_collection(node_ids, context)
+}
+
+fn element_get_elements_by_class_name(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let class_str = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let classes: Vec<String> = class_str
+        .split_ascii_whitespace()
+        .map(String::from)
+        .collect();
+    let node_ids = with_current_runtime(|inner| {
+        let mut results = Vec::new();
+        if classes.is_empty() {
+            return Ok(results);
+        }
+        let mut stack = Vec::new();
+        for &c in inner.doc.get_children(node_id).iter().rev() {
+            stack.push(c);
+        }
+        while let Some(curr) = stack.pop() {
+            if let Some(node) = inner.doc.node(curr) {
+                if let Some(el) = node.as_element() {
+                    if classes.iter().all(|c| el.has_class(c)) {
+                        results.push(curr);
+                    }
+                }
+            }
+            for &c in inner.doc.get_children(curr).iter().rev() {
+                stack.push(c);
+            }
+        }
+        Ok(results)
+    })?;
+    wrap_elements_as_collection(node_ids, context)
+}
+
+fn document_get_elements_by_name(
+    _this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let name_str = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let root = with_current_runtime(|inner| Ok(inner.doc.root()))?;
+    let node_ids = with_current_runtime(|inner| {
+        let mut results = Vec::new();
+        let mut stack = Vec::new();
+        for &c in inner.doc.get_children(root).iter().rev() {
+            stack.push(c);
+        }
+        while let Some(curr) = stack.pop() {
+            if let Some(node) = inner.doc.node(curr) {
+                if let Some(el) = node.as_element() {
+                    if el.get_attribute("name") == Some(&name_str) {
+                        results.push(curr);
+                    }
+                }
+            }
+            for &c in inner.doc.get_children(curr).iter().rev() {
+                stack.push(c);
+            }
+        }
+        Ok(results)
+    })?;
+    wrap_elements_as_collection(node_ids, context)
+}
+
+fn element_get_elements_by_tag_name(
+    this: &JsValue,
+    args: &[JsValue],
+    context: &mut Context,
+) -> JsResult<JsValue> {
+    let node_id = get_node_id_from_this(this)?;
+    let tag = args.get_or_undefined(0).to_string(context)?.to_std_string_escaped();
+    let match_all = tag == "*";
+    let node_ids = with_current_runtime(|inner| {
+        let mut results = Vec::new();
+        let mut stack = Vec::new();
+        for &child in inner.doc.get_children(node_id).iter().rev() {
+            stack.push(child);
+        }
+        while let Some(curr) = stack.pop() {
+            if let Some(node) = inner.doc.node(curr) {
+                if let Some(el) = node.as_element() {
+                    if match_all || el.tag_name().eq_ignore_ascii_case(&tag) {
+                        results.push(curr);
+                    }
+                }
+            }
+            for &child in inner.doc.get_children(curr).iter().rev() {
+                stack.push(child);
+            }
+        }
+        Ok(results)
+    })?;
+    wrap_elements_as_collection(node_ids, context)
+}
+
 fn document_get_elements_by_tag_name(
     _this: &JsValue,
     args: &[JsValue],
@@ -339,12 +662,7 @@ fn document_get_elements_by_tag_name(
         Ok(result)
     })?;
 
-    let array = JsArray::new(context);
-    for node_id in node_ids {
-        let obj = get_or_create_element_object(node_id, context)?;
-        array.push(JsValue::new(obj), context)?;
-    }
-    Ok(JsValue::new(array))
+    wrap_elements_as_collection(node_ids, context)
 }
 
 fn element_get_text_content(
@@ -1139,6 +1457,12 @@ pub fn create_element_object(
         .function(NativeFunction::from_fn_ptr(element_blur), js_string!("blur"), 0)
         .function(NativeFunction::from_fn_ptr(element_click), js_string!("click"), 0)
         .function(NativeFunction::from_fn_ptr(element_get_bounding_client_rect), js_string!("getBoundingClientRect"), 0)
+        .function(NativeFunction::from_fn_ptr(element_query_selector), js_string!("querySelector"), 1)
+        .function(NativeFunction::from_fn_ptr(element_query_selector_all), js_string!("querySelectorAll"), 1)
+        .function(NativeFunction::from_fn_ptr(element_matches), js_string!("matches"), 1)
+        .function(NativeFunction::from_fn_ptr(element_closest), js_string!("closest"), 1)
+        .function(NativeFunction::from_fn_ptr(element_get_elements_by_class_name), js_string!("getElementsByClassName"), 1)
+        .function(NativeFunction::from_fn_ptr(element_get_elements_by_tag_name), js_string!("getElementsByTagName"), 1)
         .property(js_string!("clientWidth"), 800, Attribute::all())
         .property(js_string!("clientHeight"), 600, Attribute::all())
         .property(js_string!("offsetWidth"), 800, Attribute::all())
@@ -1250,6 +1574,31 @@ impl JsRuntime {
             .function(
                 NativeFunction::from_fn_ptr(document_get_element_by_id),
                 js_string!("getElementById"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(document_query_selector),
+                js_string!("querySelector"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(document_query_selector_all),
+                js_string!("querySelectorAll"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(document_get_elements_by_class_name),
+                js_string!("getElementsByClassName"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(document_get_elements_by_name),
+                js_string!("getElementsByName"),
+                1,
+            )
+            .function(
+                NativeFunction::from_fn_ptr(document_get_elements_by_tag_name),
+                js_string!("getElementsByTagName"),
                 1,
             )
             .build();
